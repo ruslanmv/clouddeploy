@@ -70,8 +70,17 @@
     el.classList.toggle("cursor-not-allowed", !!on);
   }
 
+  function safeJSONParse(s) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
+  }
+
   // ----------------------------------------------------------------------------
   // Robust WS creator: if any websocket disconnects unexpectedly, force reload.
+  // Enterprise UX: avoid half-broken UI states.
   // ----------------------------------------------------------------------------
   function makeWS(url, name) {
     const ws = new WebSocket(url);
@@ -160,12 +169,11 @@
 
     function setUiMode(next, { commandLabel = "" } = {}) {
       uiMode = next;
+      setRuntimePill("Connected", true);
 
       if (next === UI_MODE.WELCOME) {
-        setRuntimePill("Connected", true);
         setStatus("Pick a script to start.");
       } else {
-        setRuntimePill("Connected", true);
         setStatus(commandLabel ? `Running: ${commandLabel}` : "Running session…");
       }
     }
@@ -265,7 +273,7 @@
 
     let selectedScript = null;
     let cachedScripts = [];
-    let switchMode = false; // true when user clicked End Session (but we haven't stopped anything yet)
+    let switchMode = false; // user clicked End Session (but we haven't stopped anything yet)
 
     function openScriptModal() {
       scriptModal?.classList.remove("hidden");
@@ -340,28 +348,28 @@
       switchMode = true;
       openScriptModal();
 
-      // UX copy for switch mode (does not stop current session yet)
+      // UX copy for switch mode (no disruption yet)
       if (scriptSelectedLabel) {
         scriptSelectedLabel.textContent =
-          "Choose a script to start a new session. Current session will stay running until you start the new one.";
+          "Switch session: pick a script to start a new session. Current session will keep running until you click Start session.";
       }
 
-      // Ensure list is visible (fix your issue where only header + cancel appears)
+      // Ensure list + CTA visible (fix “header + cancel only”)
       if (scriptList) scriptList.style.display = "";
       if (scriptStartBtn) scriptStartBtn.style.display = "";
+
+      // Render from cache immediately (then refreshed in background if needed)
       if (cachedScripts && cachedScripts.length) renderScripts(cachedScripts);
 
       disable(scriptStartBtn, !selectedScript);
 
-      timeline("Switch session: pick a script to start a new session, or Cancel to return.", "info");
+      timeline("Switch session opened. Cancel returns to your current session.", "info");
     }
 
     function exitSwitchModeReturnToSession() {
       switchMode = false;
       closeScriptModal();
-
-      // No server stop happened. User continues exactly where they were.
-      timeline("Switch session cancelled. Returning to current session.", "info");
+      timeline("Switch cancelled. Returning to current session.", "info");
       setTimeout(() => term.focus(), 50);
     }
 
@@ -371,14 +379,13 @@
       disable(scriptStartBtn, true);
 
       try {
-        // IMPORTANT: if a session is running AND user is switching,
-        // we stop the old session ONLY NOW (when user commits to starting new).
+        // Commit point: ONLY now stop previous session (best practice)
         if (switchMode) {
           timeline("Stopping current session…", "info");
           await stopSessionBestEffort();
         }
 
-        // Clear terminal + AI for the new session (requirement)
+        // Clear UI context for NEW session (requirement)
         try {
           term.reset();
         } catch {}
@@ -405,10 +412,8 @@
       }
     }
 
-    // Cancel button behavior:
-    // - if switching, Cancel returns to current session (no stop)
-    // - if welcome, Cancel just hides modal
     function onCancelModal() {
+      // In switch mode, Cancel must return to the active session (no stop).
       if (switchMode) return exitSwitchModeReturnToSession();
       closeScriptModal();
     }
@@ -421,14 +426,17 @@
     // State WS
     // -----------------------------
     wsState.addEventListener("message", (ev) => {
-      const st = JSON.parse(ev.data);
+      const st = safeJSONParse(ev.data);
+      if (!st) return;
 
       if (st.phase === "idle") {
         sessionStarted = false;
-        setUiMode(UI_MODE.WELCOME);
+        // If user is switching, do not yank them out—let them decide.
+        if (!switchMode) setUiMode(UI_MODE.WELCOME);
       } else {
         sessionStarted = true;
-        setUiMode(UI_MODE.RUNNING);
+        // If user is switching, do not flip the UI mode under them.
+        if (!switchMode) setUiMode(UI_MODE.RUNNING);
       }
 
       if (st.waiting_for_input) showBanner(st.prompt, st.choices);
@@ -436,7 +444,7 @@
 
       if (st.completed) setStatus("Deployment completed.");
       else if (st.last_error) setStatus(`Error: ${st.last_error}`);
-      else if (st.phase) setStatus(`Phase: ${st.phase}`);
+      else if (st.phase && !switchMode) setStatus(`Phase: ${st.phase}`);
 
       const summary = $("#summaryPre");
       if (summary) summary.textContent = JSON.stringify(st, null, 2);
@@ -454,10 +462,19 @@
         }
         issues.appendChild(p);
       }
+
+      // Optional enterprise UX: if a session just ended naturally, offer script picker.
+      // (Does not stop anything; just makes it easy to start again.)
+      if (st.phase === "idle" && uiMode === UI_MODE.RUNNING && !switchMode) {
+        // Session ended; make next action obvious
+        openScriptModal();
+        timeline("Session ended. Choose a script to start a new session.", "info");
+        setUiMode(UI_MODE.WELCOME);
+      }
     });
 
     // -----------------------------
-    // AI Chat (keep unfrozen)
+    // AI Chat
     // -----------------------------
     const aiInput = $("#aiInput");
     const aiSendBtn = $("#aiSendBtn");
@@ -499,11 +516,8 @@
 
     wsAI.addEventListener("open", () => {
       setAiEnabled(true);
-      // Initial greet on first connect only if empty
       const feed = $("#aiFeed");
-      if (feed && feed.children.length === 0) {
-        clearAiChat({ greet: true });
-      }
+      if (feed && feed.children.length === 0) clearAiChat({ greet: true });
     });
     wsAI.addEventListener("close", () => setAiEnabled(false));
     wsAI.addEventListener("error", () => setAiEnabled(false));
@@ -512,7 +526,7 @@
     setAiEnabled(false);
 
     // -----------------------------
-    // Autopilot
+    // Autopilot (BEST PRACTICE UX: telemetry to timeline, not assistant chat)
     // -----------------------------
     const autopilotBtn = $("#autopilotBtn");
     const autopilotPill = $("#autopilotPill");
@@ -534,11 +548,17 @@
     });
 
     wsAutopilot.addEventListener("message", (ev) => {
-      const msg = JSON.parse(ev.data);
+      const msg = safeJSONParse(ev.data);
+      if (!msg) return;
+
       if (msg.type === "autopilot_status") updateAutopilot(!!msg.enabled);
+
       if (msg.type === "autopilot_event") {
-        aiMessage(`🤖 ${msg.event}${msg.error ? " | " + msg.error : ""}`, "assistant");
-        timeline(`Autopilot event: ${msg.event}`, "info");
+        // Enterprise UX: autopilot is operational telemetry, not assistant content.
+        timeline(
+          `Autopilot: ${msg.event}${msg.error ? " | " + msg.error : ""}`,
+          msg.error ? "error" : "info"
+        );
       }
     });
 
@@ -564,21 +584,19 @@
     });
 
     // -----------------------------
-    // End session (NEW BEST PRACTICE UX):
+    // End session (BEST PRACTICE UX):
     // - DOES NOT stop anything immediately
     // - Opens script picker in "switch mode"
     // - Cancel returns to current session
     // - Old session stops ONLY when user starts a new one
     // -----------------------------
     $("#endSessionBtn")?.addEventListener("click", async () => {
-      // Keep user safe from accidental clicks
       if (uiMode !== UI_MODE.RUNNING) {
-        // If nothing running, it's just "welcome"
         openScriptModal();
         return;
       }
 
-      // Ensure scripts are visible (fixes your "only header + cancel" issue)
+      // Ensure scripts list renders (fix “header + cancel only”)
       if (!cachedScripts || cachedScripts.length === 0) {
         try {
           await loadScripts();
@@ -598,6 +616,7 @@
     try {
       await loadScripts();
       const status = await fetchSessionStatus();
+
       if (status.running) {
         sessionStarted = true;
         setUiMode(UI_MODE.RUNNING, { commandLabel: status.command || "Existing session" });
