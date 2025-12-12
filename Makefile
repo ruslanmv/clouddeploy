@@ -2,12 +2,21 @@ SHELL := /bin/bash
 .ONESHELL:
 .SHELLFLAGS := -eu -o pipefail -c
 
+# --- FIXES ---
+# Fixes "Failed to hardlink" warning for WSL /mnt paths
+# IMPORTANT: No trailing spaces after "copy"
+export UV_LINK_MODE=copy
+# ----------------
+
 UV ?= uv
 PYTHON_VERSION ?= 3.11
 
 HOST ?= 127.0.0.1
 PORT ?= 8787
 CMD ?= ./scripts/push_to_code_engine.sh
+
+# Sentinel file to track if venv is up to date
+VENV_SENTINEL := .venv/.installed
 
 .PHONY: help
 help:
@@ -27,40 +36,46 @@ help:
 	@echo "  HOST=$(HOST)  PORT=$(PORT)"
 	@echo "  CMD=$(CMD)"
 
-.PHONY: install
-install:
+# The real installation logic. 
+# Only runs if .venv is missing OR pyproject.toml has changed.
+$(VENV_SENTINEL): pyproject.toml
 	$(UV) python install $(PYTHON_VERSION)
 	$(UV) venv --python $(PYTHON_VERSION)
 	$(UV) sync --dev
 	# Ensure the local project itself is importable inside the env (editable install)
 	$(UV) pip install -e .
+	# Create/Update the sentinel file
+	touch $(VENV_SENTINEL)
+
+.PHONY: install
+install: $(VENV_SENTINEL)
 
 .PHONY: run
-run: install
+run: $(VENV_SENTINEL)
 	# Most reliable: run as a module so imports always work
 	$(UV) run python -m clouddeploy ui --host $(HOST) --port $(PORT) --cmd "$(CMD)"
 
 .PHONY: mcp
-mcp: install
+mcp: $(VENV_SENTINEL)
 	@echo "MCP server running over stdio."
 	@echo 'Example: echo "{\"id\":\"1\",\"tool\":\"cli.read\",\"args\":{}}" | $(UV) run python -m clouddeploy mcp --cmd "$(CMD)"'
 	$(UV) run python -m clouddeploy mcp --cmd "$(CMD)"
 
 .PHONY: test
-test: install
+test: $(VENV_SENTINEL)
 	$(UV) run pytest -q
 
 .PHONY: lint
-lint: install
+lint: $(VENV_SENTINEL)
 	$(UV) run ruff check .
 
 .PHONY: format
-format: install
+format: $(VENV_SENTINEL)
 	$(UV) run ruff format .
 	$(UV) run ruff check . --fix
 
 .PHONY: build
-build: install
+build: $(VENV_SENTINEL)
 	$(UV) build
 
 .PHONY: clean
