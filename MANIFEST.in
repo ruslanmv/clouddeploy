@@ -1,0 +1,10 @@
+include README.md
+include LICENSE
+include pyproject.toml
+include Makefile
+
+recursive-include clouddeploy/web *.html *.js *.css
+recursive-include scripts *.sh
+
+# If you later add any templates/static/etc:
+# recursive-include clouddeploy/templates *

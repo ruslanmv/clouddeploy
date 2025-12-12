@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <base target="_self" />
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CloudDeploy Enterprise Workspace</title>
+    <meta name="description" content="CloudDeploy Enterprise Workspace Interface" />
+
+    <!-- Tailwind + Icons -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css"
+    />
+
+    <!-- xterm -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+
+    <!-- App CSS -->
+    <link rel="stylesheet" href="/assets/styles.css" />
+
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              "terminal-bg": "#1e1e1e",
+              "terminal-text": "#d4d4d4",
+              "primary-blue": "#0062ff",
+              "secondary-blue": "#e6f0ff",
+              "status-running": "#00a86b",
+            },
+            fontFamily: {
+              mono: ['"Courier New"', "monospace"],
+            },
+          },
+        },
+      };
+    </script>
+  </head>
+
+  <body class="h-screen flex flex-col bg-gray-50 overflow-hidden">
+    <!-- Header -->
+    <header class="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between">
+      <div class="flex items-center space-x-4 min-w-0">
+        <h1 class="text-xl font-bold text-gray-800 whitespace-nowrap">CloudDeploy</h1>
+
+        <span
+          class="bg-gray-100 text-gray-600 px-3 py-1 rounded-full text-sm font-medium whitespace-nowrap"
+          title="Cloud provider"
+        >
+          IBM Cloud
+        </span>
+
+        <span
+          id="runtimePill"
+          class="bg-status-running bg-opacity-10 text-status-running px-3 py-1 rounded-full text-sm font-medium flex items-center whitespace-nowrap"
+          title="Session status"
+        >
+          <span class="w-2 h-2 rounded-full bg-status-running mr-2"></span>
+          Running
+        </span>
+
+        <span
+          id="autopilotPill"
+          class="bg-gray-200 bg-opacity-50 text-gray-700 px-3 py-1 rounded-full text-sm font-medium flex items-center whitespace-nowrap"
+          title="Autopilot status"
+        >
+          <span class="w-2 h-2 rounded-full bg-gray-400 mr-2"></span>
+          Autopilot Off
+        </span>
+      </div>
+
+      <div class="flex items-center space-x-3">
+        <button
+          id="autopilotBtn"
+          class="bg-gray-100 text-gray-700 hover:bg-gray-200 px-3 py-1 rounded-md text-sm font-medium flex items-center"
+          title="Toggle autopilot (safe, policy-guarded)"
+        >
+          <i class="fas fa-robot mr-2"></i>
+          Autopilot: Off
+        </button>
+
+        <button
+          id="exportLogsBtn"
+          class="text-gray-600 hover:text-gray-800 px-3 py-1 rounded-md text-sm font-medium flex items-center"
+          title="Download terminal logs from this session"
+        >
+          <i class="fas fa-file-export mr-2"></i>
+          Export Logs
+        </button>
+
+        <button
+          id="endSessionBtn"
+          class="text-red-600 hover:text-red-800 px-3 py-1 rounded-md text-sm font-medium flex items-center"
+          title="Disconnect UI (does not kill local process in v1)"
+        >
+          <i class="fas fa-power-off mr-2"></i>
+          End Session
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-1 flex overflow-hidden">
+      <!-- Terminal Panel -->
+      <section class="w-1/2 bg-terminal-bg text-terminal-text font-mono p-4 flex flex-col">
+        <!-- Prompt banner -->
+        <div id="promptBanner" class="mb-4 p-3 bg-gray-800 rounded hidden">
+          <p id="promptBannerText" class="text-sm text-gray-100">Waiting for input…</p>
+          <div id="promptBannerActions" class="flex flex-wrap gap-2 mt-3">
+            <button
+              id="quickAction1"
+              class="bg-primary-blue hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
+            >
+              1
+            </button>
+            <button
+              id="quickAction2"
+              class="bg-gray-600 hover:bg-gray-700 text-white px-3 py-1 rounded text-sm"
+            >
+              2
+            </button>
+            <button
+              id="quickEnter"
+              class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-sm"
+              title="Send Enter"
+            >
+              Enter
+            </button>
+          </div>
+        </div>
+
+        <!-- xterm container -->
+        <div class="flex-1 overflow-hidden rounded" id="terminalContainer">
+          <div id="xterm" class="h-full w-full"></div>
+        </div>
+
+        <!-- tiny footer hint -->
+        <div class="mt-3 text-xs text-gray-400">
+          Tip: click the terminal to focus. Autopilot is policy-guarded and stops on errors.
+        </div>
+      </section>
+
+      <!-- AI Panel -->
+      <section class="w-1/2 bg-white border-l border-gray-200 flex flex-col">
+        <!-- Tabs -->
+        <div class="border-b border-gray-200 flex">
+          <button
+            data-tab="assistant"
+            class="tabBtn px-4 py-3 text-sm font-medium text-primary-blue border-b-2 border-primary-blue"
+          >
+            Assistant
+          </button>
+          <button
+            data-tab="summary"
+            class="tabBtn px-4 py-3 text-sm font-medium text-gray-500 hover:text-gray-700"
+          >
+            Summary
+          </button>
+          <button
+            data-tab="issues"
+            class="tabBtn px-4 py-3 text-sm font-medium text-gray-500 hover:text-gray-700"
+          >
+            Issues
+          </button>
+        </div>
+
+        <div class="flex-1 overflow-hidden flex flex-col">
+          <!-- Assistant tab -->
+          <div id="tab-assistant" class="tabPanel flex-1 overflow-auto p-6">
+            <!-- Status Card -->
+            <div id="statusCard" class="bg-secondary-blue rounded-lg p-4 mb-6">
+              <div class="flex items-center">
+                <div
+                  class="w-10 h-10 rounded-full bg-primary-blue flex items-center justify-center text-white mr-3"
+                >
+                  <i class="fas fa-info"></i>
+                </div>
+                <div class="min-w-0">
+                  <h3 class="font-medium text-gray-800">Workspace Status</h3>
+                  <p id="statusCardText" class="text-sm text-gray-600 truncate">Connecting…</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- AI feed -->
+            <div id="aiFeed" class="space-y-3"></div>
+          </div>
+
+          <!-- Summary tab -->
+          <div id="tab-summary" class="tabPanel hidden flex-1 overflow-auto p-6">
+            <div class="rounded-lg border border-gray-200 p-4 bg-white">
+              <h3 class="font-medium text-gray-800 mb-2">Deployment Summary</h3>
+              <pre id="summaryPre" class="text-xs bg-gray-50 p-3 rounded overflow-auto whitespace-pre-wrap"></pre>
+            </div>
+          </div>
+
+          <!-- Issues tab -->
+          <div id="tab-issues" class="tabPanel hidden flex-1 overflow-auto p-6">
+            <div class="rounded-lg border border-gray-200 p-4 bg-white">
+              <h3 class="font-medium text-gray-800 mb-2">Detected Issues</h3>
+              <div id="issuesList" class="text-sm text-gray-700 space-y-2">
+                <p class="text-gray-500">No issues detected yet.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Chat input (fixed footer inside AI panel) -->
+          <div class="border-t border-gray-200 p-4 bg-white">
+            <div class="relative">
+              <input
+                id="aiInput"
+                type="text"
+                placeholder="Ask the assistant..."
+                class="w-full border border-gray-300 rounded-md py-2 px-4 pr-10 focus:outline-none focus:ring-2 focus:ring-primary-blue focus:border-transparent"
+              />
+              <button
+                id="aiSendBtn"
+                class="absolute right-2 top-2 text-gray-400 hover:text-primary-blue"
+                title="Send"
+              >
+                <i class="fas fa-paper-plane"></i>
+              </button>
+            </div>
+            <div class="mt-2 text-xs text-gray-500">
+              AI reads sanitized terminal output and state; it doesn’t execute commands unless Autopilot is enabled.
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Drawer -->
+    <footer class="bg-white border-t border-gray-200">
+      <button
+        id="drawerToggle"
+        class="w-full px-4 py-2 text-left text-sm font-medium text-gray-700 hover:bg-gray-50 flex items-center justify-between"
+      >
+        <span>Timeline / Logs</span>
+        <i id="drawerIcon" class="fas fa-chevron-up"></i>
+      </button>
+
+      <div id="drawerContent" class="h-44 overflow-auto p-4 bg-gray-50 hidden">
+        <div id="timeline" class="text-xs font-mono space-y-1 text-gray-700"></div>
+      </div>
+    </footer>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
