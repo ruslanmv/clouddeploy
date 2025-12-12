@@ -7,6 +7,8 @@
 ![License](https://img.shields.io/badge/License-Apache--2.0-green)
 ![Open Source](https://img.shields.io/badge/Open%20Source-Yes-orange)
 
+![](assets/2025-12-12-16-06-20.png)
+
 If you’ve ever lost hours to “works on my machine” deployments, interactive CLIs, missing env vars, or confusing cloud logs — **CloudDeploy** is for you.
 
 CloudDeploy is a **local workspace** that runs your **real interactive deployment CLI** in a browser (left panel), while an **AI deployment copilot** (right panel) explains what’s happening, flags issues early, and suggests next actions — with an optional **Autopilot** mode that can safely drive wizard prompts under guardrails.
@@ -117,6 +119,18 @@ Open:
 * [http://127.0.0.1:8787](http://127.0.0.1:8787)
 
 > Tip: You can run **any** interactive CLI wizard — detection is pluggable.
+## Choose Script
+![](assets/2025-12-12-16-04-29.png)
+
+## Building and Deployment Scripts
+
+![](assets/2025-12-12-16-06-20.png)
+
+## AI Assistant 
+![](assets/2025-12-12-16-13-51.png)
+
+## Interactive Shells
+![](assets/2025-12-12-16-17-24.png)
 
 ---
 
