@@ -1,3 +1,4 @@
+# clouddeploy/server.py
 from __future__ import annotations
 
 import asyncio
@@ -38,7 +39,6 @@ def _strict_policy() -> Optional[bool]:
 
 
 def _default_cmd() -> str:
-    # Only used if someone starts session without selecting (shouldn't happen in UI).
     return os.getenv("CLOUDDEPLOY_RUN_CMD") or os.getenv("CLOUDDEPLOY_DEFAULT_CMD") or "bash"
 
 
@@ -92,6 +92,70 @@ def api_scripts() -> JSONResponse:
     return JSONResponse({"ok": True, "scripts": _discover_scripts()})
 
 
+# -----------------------------------------------------------------------------
+# NEW: Session status + stop endpoints
+# -----------------------------------------------------------------------------
+
+@app.get("/api/session/status")
+def api_session_status() -> JSONResponse:
+    st = tools.call("session.status", {}) or {}
+    return JSONResponse(
+        {
+            "ok": True,
+            "running": bool(st.get("running")),
+            "command": st.get("command") or "",
+        }
+    )
+
+
+@app.post("/api/session/stop")
+async def api_session_stop() -> JSONResponse:
+    """
+    Stops the underlying PTY process (if running) and disables autopilot.
+    Called only when user commits to starting a NEW session.
+    """
+    global autopilot_task, autopilot_enabled
+
+    # Stop autopilot (and broadcast status)
+    autopilot_enabled = False
+    try:
+        await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
+    except Exception:
+        pass
+
+    if autopilot_task and not autopilot_task.done():
+        autopilot_task.cancel()
+        try:
+            await autopilot_task
+        except Exception:
+            pass
+
+    # Prefer ToolRegistry stop if implemented
+    try:
+        tools.call("session.stop", {})
+    except Exception:
+        pass
+
+    # Hard-stop the PTY runner
+    runner = getattr(tools, "_runner", None)
+    if runner is not None:
+        try:
+            runner.terminate()
+        except Exception:
+            pass
+        try:
+            runner.close()
+        except Exception:
+            pass
+
+    try:
+        setattr(tools, "_runner", None)
+    except Exception:
+        pass
+
+    return JSONResponse({"ok": True, "stopped": True})
+
+
 @app.post("/api/session/start")
 async def api_session_start(payload: Dict[str, Any]) -> JSONResponse:
     """
@@ -130,9 +194,6 @@ async def broadcast_autopilot(event: dict) -> None:
 
 @app.websocket("/ws/terminal")
 async def ws_terminal(ws: WebSocket) -> None:
-    """
-    Terminal output stream. If session not started yet, keep the socket alive.
-    """
     await ws.accept()
 
     last_sent = ""
@@ -163,10 +224,6 @@ async def ws_terminal(ws: WebSocket) -> None:
 
 @app.websocket("/ws/terminal_input")
 async def ws_terminal_input(ws: WebSocket) -> None:
-    """
-    Human typing channel: ONLY works after session has started.
-    Also: bypass strict policy and write directly to PTY runner.
-    """
     await ws.accept()
 
     try:
@@ -175,13 +232,11 @@ async def ws_terminal_input(ws: WebSocket) -> None:
 
             st = tools.call("session.status", {})
             if not st.get("running"):
-                # Do NOT start session here. UI must call /api/session/start first.
                 continue
 
             try:
                 runner = getattr(tools, "_runner", None)
                 if runner is None:
-                    # session.status said running, but runner missing -> ignore
                     continue
                 runner.write(data)
             except Exception as e:
@@ -236,7 +291,6 @@ async def ws_state(ws: WebSocket) -> None:
 async def ws_ai(ws: WebSocket) -> None:
     await ws.accept()
 
-    # If LLM provider init fails, we keep the websocket alive and respond with a message
     try:
         llm = build_llm()
         prompts = build_prompts(product_name="CloudDeploy", provider_name="IBM Cloud")
@@ -385,13 +439,17 @@ async def autopilot_loop() -> None:
             send = decide_input(state, tail)
 
             if send is None:
-                await broadcast_autopilot({"type": "autopilot_event", "event": "paused", "reason": "No safe action determined."})
+                await broadcast_autopilot(
+                    {"type": "autopilot_event", "event": "paused", "reason": "No safe action determined."}
+                )
                 autopilot_enabled = False
                 await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
                 return
 
             tools.call("cli.send", {"input": send, "append_newline": True})
-            await broadcast_autopilot({"type": "autopilot_event", "event": "sent_input", "input": redact_text(send)})
+            await broadcast_autopilot(
+                {"type": "autopilot_event", "event": "sent_input", "input": redact_text(send)}
+            )
             await asyncio.sleep(0.25)
 
     except asyncio.CancelledError:
