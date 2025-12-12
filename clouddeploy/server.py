@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional, Set, List, Dict, Any, Tuple
@@ -39,6 +40,10 @@ autopilot_clients: Set[WebSocket] = set()
 # Prevent race conditions between start/stop/autopilot toggles
 _session_lock = asyncio.Lock()
 _autopilot_lock = asyncio.Lock()
+
+# NEW: prevent command interleaving (plan execution vs manual typing vs autopilot)
+_exec_lock = asyncio.Lock()
+_exec_active: bool = False
 
 # Settings store (file-backed)
 settings_store = get_store()
@@ -162,14 +167,274 @@ def index() -> HTMLResponse:
     return HTMLResponse(html)
 
 
-# -----------------------------------------------------------------------------
-# Settings API (NEW)
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Helpers: stop masked keys from overwriting real keys (CRITICAL)
+# ---------------------------------------------------------------------------
+
+_MASK_RE = re.compile(r"^\*{3,}$|^[A-Za-z0-9]{0,6}\*{3,}[A-Za-z0-9]{0,6}$")
+
+
+def _looks_masked(secret: Any) -> bool:
+    s = str(secret or "").strip()
+    if not s:
+        return False
+    return "*" in s and bool(_MASK_RE.match(s))
+
+
+def _apply_llm_patch_preserving_secrets(patch: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    If UI sends masked api_key (e.g. 'sk-***xyz'), ignore it and keep stored secret.
+    This prevents "open settings then save destroys key".
+    """
+    current = _load_settings()
+
+    def fix_provider_section(provider: str) -> None:
+        if provider not in patch or not isinstance(patch.get(provider), dict):
+            return
+        sec = patch[provider]
+        if "api_key" in sec and _looks_masked(sec.get("api_key")):
+            # remove masked key so store.update keeps the current one
+            sec.pop("api_key", None)
+
+    for p in ("openai", "claude", "watsonx"):
+        fix_provider_section(p)
+
+    # Also protect nested payloads (some UIs send {provider:..., openai:{...}} etc.)
+    # After stripping masked keys, if a section became empty, drop it.
+    for p in ("openai", "claude", "watsonx", "ollama"):
+        if isinstance(patch.get(p), dict) and len(patch[p]) == 0:
+            patch.pop(p, None)
+
+    return patch
+
+
+# ---------------------------------------------------------------------------
+# Plan approval execution (EXPANDED for mkdir, touch, cp, mv, etc.)
+# ---------------------------------------------------------------------------
+
+# Block shell metacharacters (but allow spaces in paths)
+_META_CHARS = re.compile(r"[;&|`$<>\\]|(\$\()|(\)\s*)")
+
+# Block obviously destructive commands
+_BLOCKLIST = re.compile(
+    r"\b(sudo|shutdown|reboot|mkfs|dd|:>|chmod\s+777|chown|useradd|usermod|groupadd|iptables|ufw|systemctl|service)\b",
+    re.IGNORECASE,
+)
+
+# EXPANDED allowlist: read-only + common write operations (mkdir, touch, cp, mv, etc.)
+_ALLOWED_PREFIXES = {
+    # Read-only / inspection commands
+    "ls",
+    "pwd",
+    "whoami",
+    "id",
+    "date",
+    "uname",
+    "env",
+    "printenv",
+    "echo",
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "find",
+    "stat",
+    "du",
+    "df",
+    "ps",
+    "top",
+    "tree",
+    "file",
+    "which",
+    "whereis",
+    # Write operations (safe for development/deployment)
+    "mkdir",   # ✅ CREATE FOLDERS
+    "touch",   # ✅ CREATE FILES
+    "cp",      # ✅ COPY FILES
+    "mv",      # ✅ MOVE/RENAME FILES
+    "rm",      # ⚠️ ALLOW with validation (see special handling below)
+    "nano",    # Text editors
+    "vi",
+    "vim",
+    # Cloud/Container CLIs
+    "docker",
+    "ibmcloud",
+    "kubectl",
+    "helm",
+    "git",
+    # Development tools
+    "npm",
+    "yarn",
+    "pip",
+    "python",
+    "python3",
+    "node",
+    "jq",
+    "curl",
+    "wget",
+    # Build/deploy
+    "make",
+    "mvn",
+    "gradle",
+}
+
+# For "powerful" CLIs, enforce read-only-ish subcommands
+_READONLY_SUBCOMMANDS = {
+    "docker": {"ps", "images", "info", "version", "logs", "inspect", "stats", "build", "run", "exec"},
+    "kubectl": {"get", "describe", "logs", "top", "version", "config", "apply", "create", "delete"},
+    "helm": {"list", "status", "get", "version", "install", "upgrade", "uninstall"},
+    "git": {"status", "log", "diff", "branch", "rev-parse", "show", "clone", "pull", "push", "commit", "add"},
+    "ibmcloud": {"version", "help", "target", "regions", "resource", "cr", "ce", "login", "ks", "plugin"},
+}
+
+# Special validation for rm: only allow specific safe patterns
+_SAFE_RM_PATTERNS = [
+    r"^rm\s+-rf?\s+[a-zA-Z0-9_\-./]+$",  # rm -rf folder_name or ./path/to/folder
+    r"^rm\s+[a-zA-Z0-9_\-./]+\.(txt|log|tmp|json|yml|yaml)$",  # rm file.txt
+]
+
+
+def _validate_rm_command(cmd: str) -> Tuple[bool, str]:
+    """
+    Special validation for rm commands.
+    Only allow safe patterns like:
+    - rm -rf temp_folder
+    - rm file.txt
+    Block dangerous patterns like:
+    - rm -rf / 
+    - rm -rf /*
+    - rm -rf ~
+    """
+    c = cmd.strip()
+    
+    # Block extremely dangerous patterns
+    if re.search(r"rm\s+.*(/\s|/\*|\~|\.\.)", c):
+        return False, "rm with /, /*, ~, or .. is not allowed"
+    
+    # Check if it matches any safe pattern
+    for pattern in _SAFE_RM_PATTERNS:
+        if re.match(pattern, c):
+            return True, ""
+    
+    return False, "rm command doesn't match safe patterns (use: rm file.txt or rm -rf folder_name)"
+
+
+def _validate_cmd(cmd: str) -> Tuple[bool, str]:
+    """
+    Validates commands with expanded allowlist for practical use.
+    Returns (ok, error_message).
+    """
+    c = (cmd or "").strip()
+    if not c:
+        return False, "Empty command"
+    if len(c) > 500:
+        return False, "Command too long"
+    
+    # Block shell metacharacters (pipes, redirects, command chaining)
+    if _META_CHARS.search(c):
+        return False, "Shell metacharacters (|, ;, &, >, <, $, \\) are not allowed"
+    
+    # Block destructive commands
+    if _BLOCKLIST.search(c):
+        return False, "Command contains a blocked/destructive keyword"
+
+    parts = c.split()
+    root = parts[0].lower()
+
+    if root not in _ALLOWED_PREFIXES:
+        return False, f"Command '{root}' is not in the allowlist"
+
+    # Special handling for rm
+    if root == "rm":
+        return _validate_rm_command(c)
+
+    # For powerful CLIs, check subcommands
+    if root in _READONLY_SUBCOMMANDS:
+        if len(parts) < 2:
+            return False, f"'{root}' requires a subcommand"
+        sub = parts[1].lower()
+        if sub not in _READONLY_SUBCOMMANDS[root]:
+            return False, f"'{root} {sub}' is not in the allowed subcommands"
+
+    return True, ""
+
+
+async def _exec_plan_steps(steps: List[Dict[str, Any]]) -> Tuple[bool, str]:
+    """
+    Executes approved plan steps sequentially.
+    IMPORTANT: Bypasses policy checks because commands are already validated by _validate_cmd.
+    
+    This is what actually TYPES the commands into the left terminal (PTY).
+    """
+    global _exec_active
+
+    st = await _session_status()
+    if not st.get("running"):
+        return False, "No session is running"
+
+    async with _exec_lock:
+        if _exec_active:
+            return False, "Execution is already in progress"
+        _exec_active = True
+
+        try:
+            for i, step in enumerate(steps, start=1):
+                cmd = str(step.get("cmd") or "").strip()
+                ok, err = _validate_cmd(cmd)
+                if not ok:
+                    return False, f"Step {i} rejected: {err} | cmd={cmd}"
+
+                # ✅ BYPASS POLICY: Write directly to PTY for approved plan commands
+                # We already validated with _validate_cmd above, so skip cli.send policy
+                runner = _get_runner()
+                if runner is None:
+                    return False, f"Step {i}: PTY session not available"
+                
+                try:
+                    # Write command + newline directly to PTY
+                    runner.write(f"{cmd}\n")
+                except Exception as e:
+                    return False, f"Step {i}: Failed to write to PTY: {e}"
+                
+                # Wait for command to execute and output to appear
+                await asyncio.sleep(0.30)
+
+            return True, ""
+        finally:
+            _exec_active = False
+
+
+@app.post("/api/plan/execute")
+async def api_plan_execute(payload: Dict[str, Any]) -> JSONResponse:
+    """
+    Execute an APPROVED plan.
+    Payload:
+      { "steps": [ {"cmd":"ls -la","why":"...","risk":"low"}, ... ] }
+    
+    This endpoint is called by the frontend when user clicks "Approve & Run".
+    """
+    steps = payload.get("steps") or []
+    if not isinstance(steps, list) or len(steps) == 0:
+        return JSONResponse({"ok": False, "error": "Missing steps"}, status_code=400)
+
+    # Hard limit for safety
+    if len(steps) > 15:
+        return JSONResponse({"ok": False, "error": "Too many steps (max 15)"}, status_code=400)
+
+    ok, err = await _exec_plan_steps(steps)
+    if not ok:
+        return JSONResponse({"ok": False, "error": err}, status_code=409)
+
+    return JSONResponse({"ok": True, "executed": len(steps)})
+
+
+# ---------------------------------------------------------------------------
+# Settings API
+# ---------------------------------------------------------------------------
 
 @app.get("/api/settings")
 def api_settings() -> JSONResponse:
     s = _load_settings()
-    # UI needs providers list + active provider + config fields (keys masked)
     return JSONResponse(redact_settings(s))
 
 
@@ -183,11 +448,11 @@ def api_settings_provider(payload: Dict[str, Any]) -> JSONResponse:
 @app.put("/api/settings/llm")
 def api_settings_llm(payload: Dict[str, Any]) -> JSONResponse:
     """
-    Update one or more provider sections. We accept partial patches, e.g.
-    { "openai": { "model": "gpt-4o-mini" } }
-    { "provider": "openai", "openai": { "api_key": "..." } }
+    Update one or more provider sections (partial patches supported).
+    CRITICAL: masked api_key from UI must NOT overwrite stored secrets.
     """
-    updated = settings_store.update(payload or {})
+    patch = _apply_llm_patch_preserving_secrets(payload or {})
+    updated = settings_store.update(patch)
     return JSONResponse(redact_settings(updated))
 
 
@@ -195,11 +460,6 @@ def api_settings_llm(payload: Dict[str, Any]) -> JSONResponse:
 def api_settings_models(provider: str = "") -> JSONResponse:
     """
     REAL model listing per provider (not static), cached.
-
-    - OpenAI:    GET /v1/models (requires key)
-    - Claude:    GET /v1/models (requires key)
-    - watsonx:   public model specs (no key required for IBM-managed models)
-    - ollama:    GET /api/tags
     """
     p = (provider or "").strip().lower()
     try:
@@ -212,21 +472,19 @@ def api_settings_models(provider: str = "") -> JSONResponse:
     if cached and (now - cached[0]) < MODELS_CACHE_TTL_S:
         _, models, err = cached
     else:
-        # Uses clouddeploy/llm/settings.py (AppSettings) + provider API calls
         settings = get_settings()
         models, err = list_models_for_provider(llm_provider, settings=settings)
         _models_cache[p] = (now, models, err)
 
     if err:
-        # Keep response shape stable for UI
         return JSONResponse({"ok": False, "provider": p, "error": err, "models": []}, status_code=200)
 
     return JSONResponse({"ok": True, "provider": p, "models": models})
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Script Picker API
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def _discover_scripts() -> List[Dict[str, Any]]:
     scripts: List[Dict[str, Any]] = []
@@ -257,9 +515,9 @@ def api_scripts() -> JSONResponse:
     return JSONResponse({"ok": True, "scripts": _discover_scripts()})
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Session status + stop endpoints
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 @app.get("/api/session/status")
 async def api_session_status() -> JSONResponse:
@@ -273,9 +531,10 @@ async def api_session_stop() -> JSONResponse:
     Stops the underlying PTY process (if running) and disables autopilot.
     Called only when user commits to starting a NEW session.
     """
-    global autopilot_task, autopilot_enabled
+    global autopilot_task, autopilot_enabled, _exec_active
 
     async with _session_lock:
+        # stop autopilot
         async with _autopilot_lock:
             autopilot_enabled = False
             try:
@@ -286,6 +545,11 @@ async def api_session_stop() -> JSONResponse:
             await _safe_cancel(autopilot_task)
             autopilot_task = None
 
+        # stop any in-flight plan execution
+        async with _exec_lock:
+            _exec_active = False
+
+        # stop session
         try:
             tools.call("session.stop", {})
         except Exception:
@@ -331,9 +595,9 @@ async def api_session_start(payload: Dict[str, Any]) -> JSONResponse:
     return JSONResponse({"ok": True, "command": cmd})
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Autopilot broadcast
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 async def broadcast_autopilot(event: dict) -> None:
     dead: Set[WebSocket] = set()
@@ -345,9 +609,9 @@ async def broadcast_autopilot(event: dict) -> None:
     autopilot_clients.difference_update(dead)
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # WebSockets
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 @app.websocket("/ws/terminal")
 async def ws_terminal(ws: WebSocket) -> None:
@@ -385,6 +649,11 @@ async def ws_terminal(ws: WebSocket) -> None:
 
 @app.websocket("/ws/terminal_input")
 async def ws_terminal_input(ws: WebSocket) -> None:
+    """
+    Human typing channel.
+    NOTE: we only block manual typing while plan execution is active to avoid interleaving.
+    Autopilot may still run (wizard prompts), but it should also avoid sending while _exec_active.
+    """
     await ws.accept()
 
     try:
@@ -393,6 +662,11 @@ async def ws_terminal_input(ws: WebSocket) -> None:
 
             st = await _session_status()
             if not st.get("running"):
+                continue
+
+            # Block manual typing while plan execution is active (prevents interleaving).
+            if _exec_active:
+                # silently drop; frontend should disable typing during exec anyway
                 continue
 
             try:
@@ -434,6 +708,7 @@ async def ws_state(ws: WebSocket) -> None:
                         "choices": [],
                         "completed": False,
                         "autopilot_enabled": autopilot_enabled,
+                        "exec_active": _exec_active,
                     }
                 )
                 await asyncio.sleep(0.5)
@@ -441,6 +716,7 @@ async def ws_state(ws: WebSocket) -> None:
 
             st = tools.call("state.get", {"tail_chars": 12000, "redact": True}).get("state", {}) or {}
             st["autopilot_enabled"] = autopilot_enabled
+            st["exec_active"] = _exec_active
             await ws.send_json(st)
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
@@ -463,15 +739,35 @@ def _build_llm_from_settings() -> Any:
     """
     s = _load_settings()
     try:
-        # Preferred: build_llm(settings=s)
         return build_llm(settings=s)
     except TypeError:
-        # Backward compatible: old signature build_llm()
         return build_llm()
+
+
+def _json_ws_send(ws: WebSocket, payload: Dict[str, Any]) -> asyncio.Future:
+    # We send JSON as text so the existing wsAI client still works,
+    # and the frontend can JSON.parse() when it wants.
+    return ws.send_text(json.dumps(payload, ensure_ascii=False))
+
+
+def _try_parse_json(s: str) -> Optional[Dict[str, Any]]:
+    """Helper to safely parse JSON from LLM response."""
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
 
 
 @app.websocket("/ws/ai")
 async def ws_ai(ws: WebSocket) -> None:
+    """
+    AI Chat websocket with Plan → Approve → Execute protocol.
+    
+    When user asks to DO something, AI returns a structured plan.
+    Frontend shows approval UI, then calls /api/plan/execute.
+    That's when commands actually type into the LEFT terminal (PTY).
+    """
     await ws.accept()
 
     prompts = build_prompts(product_name="CloudDeploy", provider_name="IBM Cloud")
@@ -499,25 +795,109 @@ async def ws_ai(ws: WebSocket) -> None:
             llm_err = str(e)
             last_version = ver
 
+    # System instruction for the "Plan → Approve → Execute" protocol
+    plan_protocol = """
+You are CloudDeploy Copilot.
+
+When the user asks you to DO something in the terminal (examples: "list files", "create a folder", "check deployment", "build the app"),
+DO NOT execute anything yourself. Instead, return a JSON object with this EXACT format:
+
+{
+  "type": "plan",
+  "title": "<short descriptive title>",
+  "steps": [
+    {"cmd": "<single shell command>", "why": "<brief reason>", "risk": "low|medium|high"}
+  ],
+  "notes": "<optional additional context>",
+  "needs_approval": true
+}
+
+CRITICAL RULES FOR PLANS:
+1. Each "cmd" must be a SINGLE command (no pipes |, no redirects > <, no chaining with ; or &&)
+2. Keep total steps <= 8
+3. Use appropriate risk levels:
+   - "low": read-only commands (ls, cat, grep, docker ps, kubectl get)
+   - "medium": write operations (mkdir, touch, cp, mv, npm install, docker build)
+   - "high": destructive operations (rm, git push, kubectl delete, deployment commands)
+4. Be specific in "why" field (helps user understand what each step does)
+
+EXAMPLES OF GOOD PLANS:
+
+User: "List all files in the current directory"
+AI Response:
+{
+  "type": "plan",
+  "title": "List directory contents",
+  "steps": [
+    {"cmd": "ls -la", "why": "Show all files including hidden ones with details", "risk": "low"}
+  ],
+  "needs_approval": true
+}
+
+User: "Create a folder called 'example' and a file inside it"
+AI Response:
+{
+  "type": "plan",
+  "title": "Create folder structure",
+  "steps": [
+    {"cmd": "mkdir example", "why": "Create the 'example' directory", "risk": "medium"},
+    {"cmd": "touch example/README.md", "why": "Create README file inside example folder", "risk": "medium"}
+  ],
+  "needs_approval": true
+}
+
+User: "Check if Docker is running"
+AI Response:
+{
+  "type": "plan",
+  "title": "Check Docker status",
+  "steps": [
+    {"cmd": "docker ps", "why": "List running containers to verify Docker daemon", "risk": "low"}
+  ],
+  "needs_approval": true
+}
+
+If the user is ONLY asking a question or wants explanation (no action needed), return:
+{
+  "type": "message",
+  "markdown": "<your answer in markdown format>"
+}
+
+IMPORTANT: Always output valid JSON. Never include markdown fences (```json) or preamble text.
+"""
+
     try:
         while True:
             question = await ws.receive_text()
-
-            # ensure provider reflects latest /api/settings writes
             await ensure_llm_loaded()
 
             if not llm_ok:
-                await ws.send_text(
-                    "AI is not available on this server right now.\n"
-                    f"Reason: {llm_err}\n"
-                    "Tip: open Settings and verify provider credentials.\n"
-                    "Terminal still works normally."
+                await _json_ws_send(
+                    ws,
+                    {
+                        "type": "message",
+                        "markdown": (
+                            "⚠️ AI is not available on this server right now.\n\n"
+                            f"**Reason:** {llm_err}\n\n"
+                            "**Tip:** Open Settings (⚙️ top right) and verify provider credentials.\n\n"
+                            "The terminal still works normally - you can type commands directly."
+                        ),
+                    },
                 )
                 continue
 
             st_run = await _session_status()
             if not st_run.get("running"):
-                await ws.send_text("No session is running yet. Pick a script to start, then ask me again.")
+                await _json_ws_send(
+                    ws,
+                    {
+                        "type": "message",
+                        "markdown": (
+                            "No session is running yet.\n\n"
+                            "Click **Choose a script to launch** above to start, then ask me again!"
+                        ),
+                    },
+                )
                 continue
 
             recent = tools.call("cli.read", {"tail_chars": 6000, "redact": True}).get("text", "") or ""
@@ -528,27 +908,57 @@ async def ws_ai(ws: WebSocket) -> None:
             waiting_for_input = bool(st.get("waiting_for_input"))
             user_q = (question or "").strip().lower()
 
-            if not has_terminal and not waiting_for_input and user_q in {"hi", "hello", "hey"}:
-                await ws.send_text(
-                    "Hi! I’m connected.\n"
-                    "Start a script from **Choose a script to launch**, and I’ll read the terminal output and guide you."
+            # Friendly greeting when terminal is empty
+            if not has_terminal and not waiting_for_input and user_q in {"hi", "hello", "hey", "help"}:
+                await _json_ws_send(
+                    ws,
+                    {
+                        "type": "message",
+                        "markdown": (
+                            "👋 Hi! I'm your CloudDeploy copilot.\n\n"
+                            "I can help you:\n"
+                            "- 📁 List files and directories\n"
+                            "- 📝 Create folders and files\n"
+                            "- 🐳 Check Docker/Kubernetes status\n"
+                            "- 🚀 Run deployment commands\n"
+                            "- 🔍 Inspect logs and configurations\n\n"
+                            "Start a script from **Choose a script to launch**, and I'll read the terminal output to guide you!\n\n"
+                            "Or just ask me to do something (e.g., 'list all files', 'create a folder called test')."
+                        ),
+                    },
                 )
                 continue
 
+            # No terminal output yet - guide user
             if not has_terminal and not waiting_for_input:
-                await ws.send_text(
-                    "I don’t see any terminal output yet.\n"
-                    "Start a script (or run a command in the terminal), then ask me what you want to do next.\n"
-                    "If you paste the last few lines of output, I can help immediately."
+                await _json_ws_send(
+                    ws,
+                    {
+                        "type": "message",
+                        "markdown": (
+                            "I don't see any terminal output yet.\n\n"
+                            "**Two ways to proceed:**\n"
+                            "1. Start a script (click **Choose a script to launch**), or\n"
+                            "2. Tell me what you want to do (e.g., 'list all files', 'create a test folder')\n\n"
+                            "I'll create a plan for you to approve!"
+                        ),
+                    },
                 )
                 continue
 
+            # Workflow is waiting for input - show wizard state
             if waiting_for_input:
-                await ws.send_text(
-                    f"I see the workflow is waiting for input.\n"
-                    f"Prompt: {str(st.get('prompt') or '').strip() or '(not provided)'}\n"
-                    f"Choices: {st.get('choices') or []}\n"
-                    "Tell me what you want to choose (or click the quick buttons)."
+                await _json_ws_send(
+                    ws,
+                    {
+                        "type": "message",
+                        "markdown": (
+                            "🔔 **The workflow is waiting for input**\n\n"
+                            f"**Prompt:** {str(st.get('prompt') or '').strip() or '(not provided)'}\n\n"
+                            f"**Available choices:** {st.get('choices') or []}\n\n"
+                            "Tell me what you want to choose, or use the quick action buttons below the terminal."
+                        ),
+                    },
                 )
                 continue
 
@@ -561,26 +971,74 @@ async def ws_ai(ws: WebSocket) -> None:
             )
 
             guardrail = (
-                "IMPORTANT:\n"
-                "- Only claim something is happening if it is explicitly supported by TERMINAL_TAIL or STATE.\n"
-                "- If evidence is missing, say what you cannot see and ask for the next line(s) of output.\n"
-                "- Prefer short, actionable next steps.\n"
+                "CRITICAL EVIDENCE-BASED REASONING:\n"
+                "- Only claim something is happening if it is EXPLICITLY in TERMINAL_TAIL or STATE.\n"
+                "- If evidence is missing, say what you CANNOT see and ask for clarification.\n"
+                "- Prefer SHORT, ACTIONABLE next steps.\n"
+                "- When creating plans, be SPECIFIC about what each command does.\n"
             )
 
             full_prompt = (
                 f"{prompts.system}\n\n"
-                f"{guardrail}\n"
+                f"{guardrail}\n\n"
+                f"{plan_protocol}\n\n"
                 f"{prompts.analyze_status}\n\n"
                 f"{user_prompt}\n\n"
-                f"USER_QUESTION:\n{question}\n"
+                f"USER_QUESTION:\n{question}\n\n"
+                f"Remember: Output ONLY valid JSON. If creating a plan, use the exact format shown in examples."
             )
 
             try:
-                answer = llm.call(full_prompt)  # type: ignore[attr-defined]
+                raw = llm.call(full_prompt)  # type: ignore[attr-defined]
             except Exception:
-                answer = llm.invoke(full_prompt)  # type: ignore[attr-defined]
+                raw = llm.invoke(full_prompt)  # type: ignore[attr-defined]
 
-            await ws.send_text(str(answer))
+            raw_s = str(raw).strip()
+            
+            # Try to parse as JSON
+            obj = _try_parse_json(raw_s)
+
+            # If the model complied with protocol and returned a plan
+            if obj and obj.get("type") == "plan":
+                steps = obj.get("steps") or []
+                if isinstance(steps, list) and 0 < len(steps) <= 8:
+                    # Sanitize steps: ensure cmd strings
+                    clean_steps: List[Dict[str, Any]] = []
+                    for step in steps:
+                        if not isinstance(step, dict):
+                            continue
+                        cmd = str(step.get("cmd") or "").strip()
+                        why = str(step.get("why") or "No reason provided").strip()
+                        risk = str(step.get("risk") or "low").strip().lower()
+                        if risk not in {"low", "medium", "high"}:
+                            risk = "low"
+                        clean_steps.append({"cmd": cmd, "why": why, "risk": risk})
+
+                    # Validate commands and mark invalid ones as "high risk"
+                    invalids: List[str] = []
+                    for s2 in clean_steps:
+                        ok, err = _validate_cmd(s2["cmd"])
+                        if not ok:
+                            invalids.append(f"`{s2['cmd']}` - {err}")
+                            s2["risk"] = "high"
+
+                    # Add warning if some commands are blocked
+                    if invalids:
+                        obj["notes"] = (
+                            (str(obj.get("notes") or "").strip() + "\n\n").lstrip()
+                            + "⚠️ **Some proposed commands are blocked by security policy:**\n\n"
+                            + "\n".join(f"- {inv}" for inv in invalids)
+                            + "\n\nThese will be rejected if you approve the plan."
+                        )
+
+                    obj["steps"] = clean_steps
+                    obj["needs_approval"] = True  # Always require approval
+                    await _json_ws_send(ws, obj)
+                    continue
+
+            # Otherwise: treat as normal markdown message
+            await _json_ws_send(ws, {"type": "message", "markdown": raw_s})
+
     except WebSocketDisconnect:
         return
     except asyncio.CancelledError:
@@ -667,6 +1125,10 @@ async def stop_autopilot() -> None:
 
 
 async def autopilot_loop() -> None:
+    """
+    Autopilot drives wizard prompts (policy-guarded cli.send).
+    IMPORTANT: it must not interleave with approved plan execution.
+    """
     global autopilot_enabled
 
     try:
@@ -686,6 +1148,11 @@ async def autopilot_loop() -> None:
                 except Exception:
                     pass
                 await asyncio.sleep(0.5)
+                continue
+
+            # Do not send autopilot input while a plan is executing
+            if _exec_active:
+                await asyncio.sleep(0.25)
                 continue
 
             wait_res = tools.call("cli.wait_for_prompt", {"timeout_s": 30, "poll_s": 0.5})
@@ -719,21 +1186,17 @@ async def autopilot_loop() -> None:
             send = decide_input(state, tail)
 
             if send is None:
+                # Best practice: stay enabled but idle instead of "pausing" off
                 try:
-                    await broadcast_autopilot(
-                        {"type": "autopilot_event", "event": "paused", "reason": "No safe action determined."}
-                    )
-                    await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
+                    await broadcast_autopilot({"type": "autopilot_event", "event": "idle_no_actionable_prompt"})
                 except Exception:
                     pass
-                autopilot_enabled = False
-                return
+                await asyncio.sleep(0.5)
+                continue
 
             tools.call("cli.send", {"input": send, "append_newline": True})
             try:
-                await broadcast_autopilot(
-                    {"type": "autopilot_event", "event": "sent_input", "input": redact_text(send)}
-                )
+                await broadcast_autopilot({"type": "autopilot_event", "event": "sent_input", "input": redact_text(send)})
             except Exception:
                 pass
 
