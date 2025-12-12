@@ -38,3 +38,7 @@ Thumbs.db
 
 # CloudDeploy local settings
 .clouddeploy/
+* copy*
+* copy*.*
+* copy *.*
+uv.lock
