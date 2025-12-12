@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clouddeploy"
-version = "0.1.0"
+version = "0.1.1"
 description = "CloudDeploy: enterprise terminal + AI workspace and MCP server for guided cloud deployments (IBM Cloud first)."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { file = "LICENSE" }
-authors = [{ name = "CloudDeploy Team" }]
+authors = [{ name = "Ruslan Magana Vsevolodovna" }]
 keywords = [
   "ibm-cloud",
   "code-engine",

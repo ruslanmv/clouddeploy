@@ -1,8 +1,14 @@
+/* clouddeploy/web/styles.css */
 /* Small enterprise polish (optional). Keep it minimal to avoid fighting Tailwind. */
 
 html,
 body {
   height: 100%;
+}
+
+/* Optional: make sure non-tailwind areas don’t fall back too small */
+body {
+  font-size: 16px;
 }
 
 #terminalContainer {
@@ -12,6 +18,13 @@ body {
 /* xterm look: slightly softer */
 .xterm {
   padding: 8px;
+}
+
+/* Optional: if xterm looks too small in the upgrade, this helps without breaking layout */
+.xterm,
+.xterm * {
+  font-size: 14px;
+  line-height: 1.35;
 }
 
 .xterm-viewport::-webkit-scrollbar {

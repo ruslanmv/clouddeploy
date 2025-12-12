@@ -62,11 +62,9 @@
   // Markdown rendering (AI messages)
   // -----------------------------
   function renderMarkdownSafe(md) {
-    // If libraries are missing, return null -> fallback to plain text
     if (!window.marked || !window.DOMPurify) return null;
     try {
       const rawHtml = window.marked.parse(md || "");
-      // Sanitize to prevent XSS
       return window.DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true } });
     } catch {
       return null;
@@ -88,7 +86,6 @@
       if (html != null) box.innerHTML = html;
       else box.textContent = text;
     } else {
-      // user text must never be interpreted as HTML
       box.textContent = text;
     }
 
@@ -101,7 +98,7 @@
     if (feed) feed.innerHTML = "";
     if (greet) {
       aiMessage(
-        "Hi! I’m your CloudDeploy copilot. Start a session and I’ll guide you step-by-step.",
+        "Hi! I'm your CloudDeploy copilot. Start a session and I'll guide you step-by-step.",
         "assistant"
       );
     }
@@ -125,23 +122,6 @@
 
   // ----------------------------------------------------------------------------
   // Settings Modal (no React)
-  // Requires index.html container:
-  //  - #settingsBtn
-  //  - #settingsModal (hidden by default)
-  //  - #settingsCloseBtn
-  //  - #settingsProviderSelect
-  //  - #settingsLoadModelsBtn
-  //  - #settingsModelsSelect
-  //  - #settingsSaveBtn
-  //  - #settingsErrorText
-  //  - #settingsSavedText
-  //  - provider-specific fields:
-  //    openai: #openaiApiKey #openaiModel #openaiBaseUrl
-  //    claude: #claudeApiKey #claudeModel #claudeBaseUrl
-  //    watsonx: #watsonxApiKey #watsonxProjectId #watsonxModelId #watsonxBaseUrl
-  //    ollama: #ollamaBaseUrl #ollamaModel
-  //  - provider sections wrappers:
-  //    #settingsOpenaiSection #settingsClaudeSection #settingsWatsonxSection #settingsOllamaSection
   // ----------------------------------------------------------------------------
   function createSettingsController() {
     const modal = $("#settingsModal");
@@ -163,7 +143,6 @@
       ollama: $("#settingsOllamaSection"),
     };
 
-    // Inputs
     const openaiApiKey = $("#openaiApiKey");
     const openaiModel = $("#openaiModel");
     const openaiBaseUrl = $("#openaiBaseUrl");
@@ -181,9 +160,8 @@
     const ollamaModel = $("#ollamaModel");
 
     let settings = null;
-    let modelsCache = {}; // { provider: [models...] }
+    let modelsCache = {};
     let saving = false;
-    let loadingModels = false;
 
     function showError(msg) {
       if (errText) errText.textContent = msg || "";
@@ -307,7 +285,6 @@
       const p = settings.provider;
       if (!p) return;
 
-      loadingModels = true;
       disable(loadModelsBtn, true);
       showError("");
 
@@ -323,7 +300,6 @@
       } catch (e) {
         showError(String(e?.message || e));
       } finally {
-        loadingModels = false;
         disable(loadModelsBtn, false);
       }
     }
@@ -331,13 +307,8 @@
     function buildPatchFromForm() {
       if (!settings) return {};
 
-      // NOTE: Your backend masks keys on GET, so user must re-enter keys to change them.
-      // If user leaves masked value "***", we will NOT send it.
       const p = settings.provider;
-
-      const patch = {
-        provider: p,
-      };
+      const patch = { provider: p };
 
       const looksMasked = (v) => typeof v === "string" && (v.includes("***") || v === "***");
 
@@ -403,11 +374,9 @@
         settings = data;
         fillFormFromSettings();
         showSaved("Settings saved.");
-
         timeline("LLM settings saved.", "success");
 
-        // Enterprise-safe option: reload to guarantee fresh ws/ai provider
-        // (If you prefer hot-swap without reload, you can close & recreate wsAI, but reload is safer.)
+        // safest for provider swap
         setTimeout(() => location.reload(), 250);
       } catch (e) {
         showError(String(e?.message || e));
@@ -417,41 +386,119 @@
       }
     }
 
-    // Wire UI events
     btn?.addEventListener("click", async () => {
       open();
       await loadSettings();
     });
-
     closeBtn?.addEventListener("click", close);
-
-    // Click outside to close (optional)
     modal?.addEventListener("click", (e) => {
       if (e.target === modal) close();
     });
-
-    providerSelect?.addEventListener("change", (e) => {
-      const val = e.target?.value;
-      changeProvider(val);
-    });
-
+    providerSelect?.addEventListener("change", (e) => changeProvider(e?.target?.value));
     loadModelsBtn?.addEventListener("click", loadModels);
-
     modelsSelect?.addEventListener("change", (e) => {
       if (!settings) return;
       const p = settings.provider;
-      const model = e.target?.value || "";
-
-      // Apply into correct input so Save will persist it
+      const model = e?.target?.value || "";
       if (p === "openai" && openaiModel) openaiModel.value = model;
       if (p === "claude" && claudeModel) claudeModel.value = model;
       if (p === "watsonx" && watsonxModelId) watsonxModelId.value = model;
       if (p === "ollama" && ollamaModel) ollamaModel.value = model;
     });
-
     saveBtn?.addEventListener("click", save);
 
     return { open, close, loadSettings };
+  }
+
+  // ----------------------------------------------------------------------------
+  // AI "Plan → Approve → Execute" UI
+  // Server sends JSON text via ws_ai:
+  //   {type:"message", markdown:"..."} OR {type:"plan", title, steps:[{cmd,why,risk}], needs_approval:true}
+  // Execution endpoint:
+  //   POST /api/plan/execute {steps:[...]}
+  // ----------------------------------------------------------------------------
+  function renderPlanCard(plan, { onApprove, onReject } = {}) {
+    const feed = $("#aiFeed");
+    if (!feed) return;
+
+    const card = document.createElement("div");
+    card.className = "rounded-xl border border-gray-200 bg-white p-4 shadow-sm";
+
+    const title = document.createElement("div");
+    title.className = "font-semibold text-gray-900";
+    title.textContent = plan.title || "Proposed plan";
+    card.appendChild(title);
+
+    if (plan.notes) {
+      const notes = document.createElement("div");
+      notes.className = "mt-2 text-sm text-gray-700 prose prose-sm max-w-none";
+      const html = renderMarkdownSafe(String(plan.notes));
+      if (html != null) notes.innerHTML = html;
+      else notes.textContent = String(plan.notes);
+      card.appendChild(notes);
+    }
+
+    const list = document.createElement("div");
+    list.className = "mt-3 space-y-2";
+    (plan.steps || []).forEach((s, idx) => {
+      const row = document.createElement("div");
+      row.className = "rounded-lg border border-gray-200 bg-gray-50 p-3";
+
+      const top = document.createElement("div");
+      top.className = "flex items-start justify-between gap-3";
+
+      const cmd = document.createElement("div");
+      cmd.className = "font-mono text-xs text-gray-900 break-all";
+      cmd.textContent = String(s.cmd || "");
+      top.appendChild(cmd);
+
+      const risk = document.createElement("span");
+      const rk = String(s.risk || "low").toLowerCase();
+      risk.className =
+        rk === "high"
+          ? "text-xs px-2 py-1 rounded-full bg-red-100 text-red-700 whitespace-nowrap"
+          : rk === "medium"
+          ? "text-xs px-2 py-1 rounded-full bg-yellow-100 text-yellow-800 whitespace-nowrap"
+          : "text-xs px-2 py-1 rounded-full bg-green-100 text-green-700 whitespace-nowrap";
+      risk.textContent = `Risk: ${rk}`;
+      top.appendChild(risk);
+
+      row.appendChild(top);
+
+      if (s.why) {
+        const why = document.createElement("div");
+        why.className = "mt-2 text-xs text-gray-700";
+        why.textContent = `${idx + 1}. ${String(s.why)}`;
+        row.appendChild(why);
+      }
+
+      list.appendChild(row);
+    });
+    card.appendChild(list);
+
+    const btns = document.createElement("div");
+    btns.className = "mt-4 flex items-center justify-end gap-2";
+
+    const rejectBtn = document.createElement("button");
+    rejectBtn.type = "button";
+    rejectBtn.className =
+      "px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-700 hover:bg-gray-50";
+    rejectBtn.textContent = "Reject";
+    rejectBtn.addEventListener("click", () => onReject && onReject(plan, card));
+
+    const approveBtn = document.createElement("button");
+    approveBtn.type = "button";
+    approveBtn.className =
+      "px-3 py-2 rounded-lg bg-primary-blue text-white text-sm hover:opacity-95";
+    approveBtn.textContent = "Approve & Run";
+    approveBtn.addEventListener("click", () => onApprove && onApprove(plan, card, approveBtn));
+
+    btns.appendChild(rejectBtn);
+    btns.appendChild(approveBtn);
+    card.appendChild(btns);
+
+    feed.appendChild(card);
+    feed.scrollTop = feed.scrollHeight;
   }
 
   document.addEventListener("DOMContentLoaded", async () => {
@@ -533,7 +580,6 @@
     // -----------------------------
     // Settings modal controller
     // -----------------------------
-    // Safe to create even if modal isn't in DOM; it just won't do anything.
     createSettingsController();
 
     // -----------------------------
@@ -550,6 +596,9 @@
     let wsInReady = false;
     let sessionStarted = false;
 
+    // NEW: plan execution lock from state
+    let execActive = false;
+
     wsTerminalOut.addEventListener("open", () => setRuntimePill("Connected", true));
     wsTerminalOut.addEventListener("message", (ev) => term.write(ev.data));
 
@@ -557,7 +606,18 @@
     wsTerminalIn.addEventListener("close", () => (wsInReady = false));
 
     function canTypeTerminal() {
-      return uiMode === UI_MODE.RUNNING && sessionStarted && wsInReady && wsTerminalIn.readyState === WebSocket.OPEN;
+      return (
+        uiMode === UI_MODE.RUNNING &&
+        sessionStarted &&
+        wsInReady &&
+        wsTerminalIn.readyState === WebSocket.OPEN &&
+        !execActive
+      );
+    }
+
+    function setTerminalTypingEnabled(on) {
+      // Soft UI-only guard (server also blocks typing while exec_active)
+      execActive = !on;
     }
 
     function sendToTerminal(data, { submit = false } = {}) {
@@ -727,7 +787,6 @@
           await stopSessionBestEffort();
         }
 
-        // New session = clean context
         try {
           term.reset();
         } catch {}
@@ -770,6 +829,8 @@
       const st = safeJSONParse(ev.data);
       if (!st) return;
 
+      execActive = !!st.exec_active;
+
       if (st.phase === "idle") {
         sessionStarted = false;
         if (!switchMode) setUiMode(UI_MODE.WELCOME);
@@ -778,12 +839,23 @@
         if (!switchMode) setUiMode(UI_MODE.RUNNING);
       }
 
+      if (execActive) {
+        setStatus("Executing approved plan…");
+      } else if (st.completed) {
+        setStatus("Deployment completed.");
+      } else if (st.last_error) {
+        setStatus(`Error: ${st.last_error}`);
+      } else if (st.phase && !switchMode) {
+        setStatus(`Phase: ${st.phase}`);
+      }
+
       if (st.waiting_for_input) showBanner(st.prompt, st.choices);
       else hideBanner();
 
-      if (st.completed) setStatus("Deployment completed.");
-      else if (st.last_error) setStatus(`Error: ${st.last_error}`);
-      else if (st.phase && !switchMode) setStatus(`Phase: ${st.phase}`);
+      // update quick buttons enabled state
+      disable(quick1, !canTypeTerminal());
+      disable(quick2, !canTypeTerminal());
+      disable(quickEnter, !canTypeTerminal());
 
       const summary = $("#summaryPre");
       if (summary) summary.textContent = JSON.stringify(st, null, 2);
@@ -802,7 +874,6 @@
         issues.appendChild(p);
       }
 
-      // Session ended naturally: make next action obvious (but do not kill anything)
       if (st.phase === "idle" && uiMode === UI_MODE.RUNNING && !switchMode) {
         openScriptModal();
         timeline("Session ended. Choose a script to start a new session.", "info");
@@ -811,16 +882,36 @@
     });
 
     // -----------------------------
-    // AI Chat
+    // AI Chat + Plan approval
     // -----------------------------
     const aiInput = $("#aiInput");
     const aiSendBtn = $("#aiSendBtn");
 
+    // If index.html doesn't have a send button, create a tiny one next to input
+    function ensureAiSendButton() {
+      if ($("#aiSendBtn")) return $("#aiSendBtn");
+      const wrap = aiInput?.parentElement;
+      if (!wrap || !aiInput) return null;
+
+      wrap.classList.add("flex", "items-center", "gap-2");
+      aiInput.classList.add("flex-1");
+
+      const b = document.createElement("button");
+      b.id = "aiSendBtn";
+      b.type = "button";
+      b.className = "px-4 py-2 rounded-md bg-primary-blue text-white text-sm font-medium";
+      b.textContent = "Send";
+      wrap.appendChild(b);
+      return b;
+    }
+
+    const ensuredSendBtn = ensureAiSendButton() || aiSendBtn;
+
     function setAiEnabled(on) {
       if (aiInput) aiInput.disabled = !on;
-      if (aiSendBtn) aiSendBtn.disabled = !on;
-      if (aiSendBtn) aiSendBtn.style.pointerEvents = on ? "auto" : "none";
-      if (aiSendBtn) aiSendBtn.style.opacity = on ? "1" : "0.5";
+      if (ensuredSendBtn) ensuredSendBtn.disabled = !on;
+      if (ensuredSendBtn) ensuredSendBtn.style.pointerEvents = on ? "auto" : "none";
+      if (ensuredSendBtn) ensuredSendBtn.style.opacity = on ? "1" : "0.5";
     }
 
     function sendAI() {
@@ -838,7 +929,7 @@
       wsAI.send(q);
     }
 
-    aiSendBtn?.addEventListener("click", (e) => {
+    ensuredSendBtn?.addEventListener("click", (e) => {
       e.preventDefault();
       e.stopPropagation();
       sendAI();
@@ -851,6 +942,54 @@
       }
     });
 
+    async function executePlan(plan, approveBtn, { autoApproved = false } = {}) {
+      const steps = Array.isArray(plan.steps) ? plan.steps : [];
+      if (steps.length === 0) return;
+
+      // Disable manual terminal typing while execution happens (server enforces too)
+      execActive = true;
+      if (approveBtn) {
+        approveBtn.disabled = true;
+        approveBtn.textContent = "Running…";
+        approveBtn.classList.add("opacity-80");
+      }
+
+      const approvalMsg = autoApproved
+        ? `🤖 Autopilot auto-approved: executing ${steps.length} step(s)…`
+        : `Approved plan: executing ${steps.length} step(s)…`;
+
+      timeline(approvalMsg, "info");
+
+      if (autoApproved) {
+        aiMessage("🤖 **Autopilot Mode:** Auto-executing plan now…", "assistant");
+      } else {
+        aiMessage("✅ Approved. Executing the plan now…", "assistant");
+      }
+
+      try {
+        const res = await fetch("/api/plan/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ steps }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+        timeline(`Plan executed (${data.executed} steps).`, "success");
+        aiMessage("✅ Done. Check the terminal output on the left.", "assistant");
+      } catch (e) {
+        timeline(`Plan execution failed: ${String(e?.message || e)}`, "error");
+        aiMessage(`❌ Plan execution failed: ${String(e?.message || e)}`, "assistant");
+      } finally {
+        execActive = false;
+        if (approveBtn) {
+          approveBtn.disabled = false;
+          approveBtn.textContent = "Approve & Run";
+          approveBtn.classList.remove("opacity-80");
+        }
+      }
+    }
+
     wsAI.addEventListener("open", () => {
       setAiEnabled(true);
       const feed = $("#aiFeed");
@@ -858,7 +997,54 @@
     });
     wsAI.addEventListener("close", () => setAiEnabled(false));
     wsAI.addEventListener("error", () => setAiEnabled(false));
-    wsAI.addEventListener("message", (ev) => aiMessage(ev.data, "assistant"));
+    wsAI.addEventListener("message", (ev) => {
+      // Server now sends JSON-as-text for ws_ai. If parsing fails, treat as plain markdown.
+      const obj = safeJSONParse(ev.data);
+
+      if (!obj || typeof obj !== "object") {
+        aiMessage(ev.data, "assistant");
+        return;
+      }
+
+      if (obj.type === "message") {
+        aiMessage(String(obj.markdown || ""), "assistant");
+        return;
+      }
+
+      if (obj.type === "plan") {
+        // ⭐ KEY FEATURE: Auto-execute if autopilot is ON
+        if (autopilotOn) {
+          // Auto-approve and execute without rendering approval UI
+          timeline("🤖 Autopilot enabled: auto-approving plan…", "info");
+          
+          // Show compact plan summary in chat
+          const stepsSummary = (obj.steps || [])
+            .map((s, i) => `${i + 1}. \`${s.cmd}\` (${s.risk})`)
+            .join("\n");
+          
+          aiMessage(
+            `🤖 **Autopilot Plan: ${obj.title || "Proposed plan"}**\n\n${stepsSummary}\n\n_Auto-executing now…_`,
+            "assistant"
+          );
+
+          // Execute immediately
+          executePlan(obj, null, { autoApproved: true });
+        } else {
+          // Manual approval mode: render approval card
+          renderPlanCard(obj, {
+            onReject: () => {
+              aiMessage("Plan rejected. Tell me what to change.", "assistant");
+              timeline("Plan rejected by user.", "info");
+            },
+            onApprove: (plan, _card, approveBtn) => executePlan(plan, approveBtn, { autoApproved: false }),
+          });
+        }
+        return;
+      }
+
+      // Fallback
+      aiMessage(ev.data, "assistant");
+    });
 
     setAiEnabled(false);
 
@@ -872,10 +1058,27 @@
     function updateAutopilot(on) {
       autopilotOn = on;
       if (autopilotBtn) {
-        autopilotBtn.innerHTML = `<i class="fas fa-robot mr-2"></i> Autopilot: ${on ? "On" : "Off"}`;
+        autopilotBtn.innerHTML = `<i class="fas fa-robot mr-2"></i> Autopilot: ${
+          on ? "On" : "Off"
+        }`;
       }
       if (autopilotPill) {
         autopilotPill.textContent = on ? "Autopilot On" : "Autopilot Off";
+      }
+
+      // Visual feedback for mode change
+      if (on) {
+        timeline("🤖 Autopilot ON: AI plans will auto-execute without approval.", "success");
+        aiMessage(
+          "🤖 **Autopilot Mode Activated**\n\nI'll now automatically execute all plans without requiring your approval. You can still reject plans by disabling Autopilot.",
+          "assistant"
+        );
+      } else {
+        timeline("👤 Autopilot OFF: Manual approval required for all plans.", "info");
+        aiMessage(
+          "👤 **Manual Mode**\n\nI'll now ask for your approval before executing any plans.",
+          "assistant"
+        );
       }
     }
 
@@ -890,7 +1093,10 @@
 
       if (msg.type === "autopilot_status") updateAutopilot(!!msg.enabled);
       if (msg.type === "autopilot_event") {
-        timeline(`Autopilot: ${msg.event}${msg.error ? " | " + msg.error : ""}`, msg.error ? "error" : "info");
+        timeline(
+          `Autopilot: ${msg.event}${msg.error ? " | " + msg.error : ""}`,
+          msg.error ? "error" : "info"
+        );
       }
     });
 
