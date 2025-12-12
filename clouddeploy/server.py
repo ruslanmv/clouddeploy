@@ -28,6 +28,10 @@ autopilot_task: Optional[asyncio.Task] = None
 autopilot_enabled: bool = False
 autopilot_clients: Set[WebSocket] = set()
 
+# Prevent race conditions between start/stop/autopilot toggles
+_session_lock = asyncio.Lock()
+_autopilot_lock = asyncio.Lock()
+
 
 def _strict_policy() -> Optional[bool]:
     v = os.getenv("CLOUDDEPLOY_STRICT_POLICY", "").strip().lower()
@@ -44,6 +48,94 @@ def _default_cmd() -> str:
 
 # IMPORTANT: do NOT start session automatically. Only /api/session/start starts it.
 tools = ToolRegistry(command=_default_cmd(), strict_policy=_strict_policy())
+
+
+async def _safe_cancel(task: Optional[asyncio.Task]) -> None:
+    """
+    Best-practice: cancel and await a task, but never let CancelledError
+    bubble into ASGI logs (especially from WebSocket handlers).
+    """
+    if not task or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        # Expected during shutdown/cancel — swallow to keep server stable.
+        pass
+    except Exception:
+        # Never let task failure crash WebSocket handler.
+        pass
+
+
+def _get_runner():
+    return getattr(tools, "_runner", None)
+
+
+async def _cleanup_dead_session_if_needed() -> None:
+    """
+    Production self-heal:
+    If the PTY process has exited but ToolRegistry still reports running,
+    clean up runner + disable autopilot so UI never freezes.
+    """
+    global autopilot_enabled, autopilot_task
+
+    runner = _get_runner()
+    if runner is None:
+        return
+
+    # Prefer PtyRunner.is_running when available
+    try:
+        is_running_attr = getattr(runner, "is_running", None)
+        if callable(is_running_attr):
+            alive = bool(is_running_attr())
+        else:
+            # fallback heuristic
+            alive = bool(getattr(runner, "pid", None)) and not bool(getattr(runner, "_closed", False))
+    except Exception:
+        # If runner inspection fails, do not assume alive.
+        alive = False
+
+    if alive:
+        return
+
+    # Runner is dead -> stop autopilot and clear runner.
+    async with _session_lock:
+        async with _autopilot_lock:
+            autopilot_enabled = False
+            try:
+                await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
+            except Exception:
+                pass
+
+            await _safe_cancel(autopilot_task)
+            autopilot_task = None
+
+        # Best-effort close
+        try:
+            runner.close()
+        except Exception:
+            pass
+
+        try:
+            setattr(tools, "_runner", None)
+        except Exception:
+            pass
+
+
+async def _session_status() -> Dict[str, Any]:
+    """
+    Authoritative status used by endpoints + websockets.
+    Ensures 'running' can't be stuck True after PTY exits.
+    """
+    await _cleanup_dead_session_if_needed()
+    st = tools.call("session.status", {}) or {}
+
+    # If ToolRegistry says running but runner is missing, correct it.
+    if st.get("running") and _get_runner() is None:
+        st["running"] = False
+
+    return st
 
 
 @app.get("/favicon.ico")
@@ -93,12 +185,12 @@ def api_scripts() -> JSONResponse:
 
 
 # -----------------------------------------------------------------------------
-# NEW: Session status + stop endpoints
+# Session status + stop endpoints
 # -----------------------------------------------------------------------------
 
 @app.get("/api/session/status")
-def api_session_status() -> JSONResponse:
-    st = tools.call("session.status", {}) or {}
+async def api_session_status() -> JSONResponse:
+    st = await _session_status()
     return JSONResponse(
         {
             "ok": True,
@@ -116,42 +208,41 @@ async def api_session_stop() -> JSONResponse:
     """
     global autopilot_task, autopilot_enabled
 
-    # Stop autopilot (and broadcast status)
-    autopilot_enabled = False
-    try:
-        await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
-    except Exception:
-        pass
+    async with _session_lock:
+        # 1) Stop autopilot first (stable + no CancelledError leaking)
+        async with _autopilot_lock:
+            autopilot_enabled = False
+            try:
+                await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
+            except Exception:
+                pass
 
-    if autopilot_task and not autopilot_task.done():
-        autopilot_task.cancel()
+            await _safe_cancel(autopilot_task)
+            autopilot_task = None
+
+        # 2) Prefer ToolRegistry stop if implemented (safe no-op if missing)
         try:
-            await autopilot_task
+            tools.call("session.stop", {})
         except Exception:
             pass
 
-    # Prefer ToolRegistry stop if implemented
-    try:
-        tools.call("session.stop", {})
-    except Exception:
-        pass
+        # 3) Hard-stop the PTY runner (best-effort)
+        runner = _get_runner()
+        if runner is not None:
+            try:
+                runner.terminate()
+            except Exception:
+                pass
+            try:
+                runner.close()
+            except Exception:
+                pass
 
-    # Hard-stop the PTY runner
-    runner = getattr(tools, "_runner", None)
-    if runner is not None:
+        # 4) Ensure registry doesn't think it's still running
         try:
-            runner.terminate()
+            setattr(tools, "_runner", None)
         except Exception:
             pass
-        try:
-            runner.close()
-        except Exception:
-            pass
-
-    try:
-        setattr(tools, "_runner", None)
-    except Exception:
-        pass
 
     return JSONResponse({"ok": True, "stopped": True})
 
@@ -160,17 +251,20 @@ async def api_session_stop() -> JSONResponse:
 async def api_session_start(payload: Dict[str, Any]) -> JSONResponse:
     """
     Start session with a chosen command, but only if the PTY hasn't started yet.
+    Self-heals stale status if a prior PTY died.
     """
     cmd = str(payload.get("cmd") or "").strip()
     if not cmd:
         return JSONResponse({"ok": False, "error": "Missing cmd"}, status_code=400)
 
-    st = tools.call("session.status", {})
-    if st.get("running"):
-        return JSONResponse({"ok": True, "already_running": True, "command": st.get("command")})
+    async with _session_lock:
+        st = await _session_status()
+        if st.get("running"):
+            return JSONResponse({"ok": True, "already_running": True, "command": st.get("command")})
 
-    tools.command = cmd
-    tools.call("session.start", {})
+        tools.command = cmd
+        tools.call("session.start", {})
+
     return JSONResponse({"ok": True, "command": cmd})
 
 
@@ -194,12 +288,15 @@ async def broadcast_autopilot(event: dict) -> None:
 
 @app.websocket("/ws/terminal")
 async def ws_terminal(ws: WebSocket) -> None:
+    """
+    Terminal output stream. If session not started yet, keep the socket alive.
+    """
     await ws.accept()
-
     last_sent = ""
+
     try:
         while True:
-            st = tools.call("session.status", {})
+            st = await _session_status()
             if not st.get("running"):
                 await asyncio.sleep(0.25)
                 continue
@@ -215,6 +312,10 @@ async def ws_terminal(ws: WebSocket) -> None:
             await asyncio.sleep(0.08)
     except WebSocketDisconnect:
         return
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
     finally:
         try:
             await ws.close()
@@ -224,18 +325,22 @@ async def ws_terminal(ws: WebSocket) -> None:
 
 @app.websocket("/ws/terminal_input")
 async def ws_terminal_input(ws: WebSocket) -> None:
+    """
+    Human typing channel: ONLY works after session has started.
+    Also: bypass strict policy and write directly to PTY runner.
+    """
     await ws.accept()
 
     try:
         while True:
             data = await ws.receive_text()
 
-            st = tools.call("session.status", {})
+            st = await _session_status()
             if not st.get("running"):
                 continue
 
             try:
-                runner = getattr(tools, "_runner", None)
+                runner = _get_runner()
                 if runner is None:
                     continue
                 runner.write(data)
@@ -245,6 +350,10 @@ async def ws_terminal_input(ws: WebSocket) -> None:
                 except Exception:
                     pass
     except WebSocketDisconnect:
+        return
+    except asyncio.CancelledError:
+        return
+    except Exception:
         return
     finally:
         try:
@@ -259,7 +368,7 @@ async def ws_state(ws: WebSocket) -> None:
 
     try:
         while True:
-            st_run = tools.call("session.status", {})
+            st_run = await _session_status()
             if not st_run.get("running"):
                 await ws.send_json(
                     {
@@ -279,6 +388,10 @@ async def ws_state(ws: WebSocket) -> None:
             await ws.send_json(st)
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
+        return
+    except asyncio.CancelledError:
+        return
+    except Exception:
         return
     finally:
         try:
@@ -314,7 +427,7 @@ async def ws_ai(ws: WebSocket) -> None:
                 )
                 continue
 
-            st_run = tools.call("session.status", {})
+            st_run = await _session_status()
             if not st_run.get("running"):
                 await ws.send_text("No session is running yet. Pick a script to start, then ask me again.")
                 continue
@@ -345,6 +458,10 @@ async def ws_ai(ws: WebSocket) -> None:
             await ws.send_text(str(answer))
     except WebSocketDisconnect:
         return
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
     finally:
         try:
             await ws.close()
@@ -372,6 +489,10 @@ async def ws_autopilot(ws: WebSocket) -> None:
                 await ws.send_json({"type": "error", "message": f"Unknown action: {action}"})
     except WebSocketDisconnect:
         return
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
     finally:
         autopilot_clients.discard(ws)
         try:
@@ -382,80 +503,136 @@ async def ws_autopilot(ws: WebSocket) -> None:
 
 async def start_autopilot() -> None:
     global autopilot_task, autopilot_enabled
-    autopilot_enabled = True
-    await broadcast_autopilot({"type": "autopilot_status", "enabled": True})
 
-    if autopilot_task and not autopilot_task.done():
-        return
+    async with _autopilot_lock:
+        # Require a running session; otherwise autopilot does nothing.
+        st = await _session_status()
+        if not st.get("running"):
+            autopilot_enabled = False
+            try:
+                await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
+                await broadcast_autopilot({"type": "autopilot_event", "event": "waiting_for_session"})
+            except Exception:
+                pass
+            return
 
-    autopilot_task = asyncio.create_task(autopilot_loop())
+        autopilot_enabled = True
+        try:
+            await broadcast_autopilot({"type": "autopilot_status", "enabled": True})
+        except Exception:
+            pass
+
+        # If already running, do nothing
+        if autopilot_task and not autopilot_task.done():
+            return
+
+        autopilot_task = asyncio.create_task(autopilot_loop())
 
 
 async def stop_autopilot() -> None:
     global autopilot_task, autopilot_enabled
-    autopilot_enabled = False
-    await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
 
-    if autopilot_task and not autopilot_task.done():
-        autopilot_task.cancel()
+    async with _autopilot_lock:
+        autopilot_enabled = False
         try:
-            await autopilot_task
+            await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
         except Exception:
             pass
 
+        await _safe_cancel(autopilot_task)
+        autopilot_task = None
+
 
 async def autopilot_loop() -> None:
+    """
+    Autopilot drives the CLI using policy-guarded cli.send.
+    Must never leak CancelledError into ASGI logs.
+    """
     global autopilot_enabled
 
-    await broadcast_autopilot({"type": "autopilot_event", "event": "started"})
+    try:
+        await broadcast_autopilot({"type": "autopilot_event", "event": "started"})
+    except Exception:
+        pass
 
     try:
-        while autopilot_enabled:
-            st_run = tools.call("session.status", {})
+        while True:
+            # self-heal session state in case PTY died
+            st_run = await _session_status()
+            if not autopilot_enabled:
+                break
+
             if not st_run.get("running"):
-                await broadcast_autopilot({"type": "autopilot_event", "event": "waiting_for_session"})
+                try:
+                    await broadcast_autopilot({"type": "autopilot_event", "event": "waiting_for_session"})
+                except Exception:
+                    pass
                 await asyncio.sleep(0.5)
                 continue
 
             wait_res = tools.call("cli.wait_for_prompt", {"timeout_s": 30, "poll_s": 0.5})
             state = wait_res.get("state", {}) or {}
-            await broadcast_autopilot({"type": "autopilot_state", "state": state})
+            try:
+                await broadcast_autopilot({"type": "autopilot_state", "state": state})
+            except Exception:
+                pass
 
             if state.get("completed"):
-                await broadcast_autopilot({"type": "autopilot_event", "event": "completed"})
+                try:
+                    await broadcast_autopilot({"type": "autopilot_event", "event": "completed"})
+                    await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
+                except Exception:
+                    pass
                 autopilot_enabled = False
-                await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
                 return
 
             if state.get("last_error"):
-                await broadcast_autopilot(
-                    {"type": "autopilot_event", "event": "error_detected", "error": state["last_error"]}
-                )
+                try:
+                    await broadcast_autopilot(
+                        {"type": "autopilot_event", "event": "error_detected", "error": state["last_error"]}
+                    )
+                    await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
+                except Exception:
+                    pass
                 autopilot_enabled = False
-                await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
                 return
 
             tail = tools.call("cli.read", {"tail_chars": 4000, "redact": True}).get("text", "")
             send = decide_input(state, tail)
 
             if send is None:
-                await broadcast_autopilot(
-                    {"type": "autopilot_event", "event": "paused", "reason": "No safe action determined."}
-                )
+                try:
+                    await broadcast_autopilot(
+                        {"type": "autopilot_event", "event": "paused", "reason": "No safe action determined."}
+                    )
+                    await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
+                except Exception:
+                    pass
                 autopilot_enabled = False
-                await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
                 return
 
             tools.call("cli.send", {"input": send, "append_newline": True})
-            await broadcast_autopilot(
-                {"type": "autopilot_event", "event": "sent_input", "input": redact_text(send)}
-            )
+            try:
+                await broadcast_autopilot(
+                    {"type": "autopilot_event", "event": "sent_input", "input": redact_text(send)}
+                )
+            except Exception:
+                pass
+
             await asyncio.sleep(0.25)
 
     except asyncio.CancelledError:
-        await broadcast_autopilot({"type": "autopilot_event", "event": "stopped"})
-        raise
+        # Key fix: do NOT re-raise; prevents "Exception in ASGI application" logs.
+        try:
+            await broadcast_autopilot({"type": "autopilot_event", "event": "stopped"})
+        except Exception:
+            pass
+        return
     except Exception as e:
-        await broadcast_autopilot({"type": "autopilot_event", "event": "crashed", "error": str(e)})
+        try:
+            await broadcast_autopilot({"type": "autopilot_event", "event": "crashed", "error": str(e)})
+            await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
+        except Exception:
+            pass
         autopilot_enabled = False
-        await broadcast_autopilot({"type": "autopilot_status", "enabled": False})
+        return
