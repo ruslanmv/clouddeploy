@@ -42,7 +42,6 @@
     </script>
 
     <style>
-      /* Ensures terminal has height; prevents “blank/frozen” look */
       #terminalContainer { min-height: 240px; }
       #xterm { height: 100%; width: 100%; }
     </style>
@@ -54,17 +53,13 @@
       <div class="flex items-center space-x-4 min-w-0">
         <h1 class="text-xl font-bold text-gray-800 whitespace-nowrap">CloudDeploy</h1>
 
-        <span
-          class="bg-gray-100 text-gray-600 px-3 py-1 rounded-full text-sm font-medium whitespace-nowrap"
-          title="Cloud provider"
-        >
+        <span class="bg-gray-100 text-gray-600 px-3 py-1 rounded-full text-sm font-medium">
           IBM Cloud
         </span>
 
         <span
           id="runtimePill"
-          class="bg-gray-200 bg-opacity-50 text-gray-700 px-3 py-1 rounded-full text-sm font-medium flex items-center whitespace-nowrap"
-          title="Session status"
+          class="bg-gray-200 bg-opacity-50 text-gray-700 px-3 py-1 rounded-full text-sm font-medium flex items-center"
         >
           <span class="w-2 h-2 rounded-full bg-gray-400 mr-2"></span>
           Connecting…
@@ -72,10 +67,8 @@
 
         <span
           id="autopilotPill"
-          class="bg-gray-200 bg-opacity-50 text-gray-700 px-3 py-1 rounded-full text-sm font-medium flex items-center whitespace-nowrap"
-          title="Autopilot status"
+          class="bg-gray-200 bg-opacity-50 text-gray-700 px-3 py-1 rounded-full text-sm font-medium"
         >
-          <span class="w-2 h-2 rounded-full bg-gray-400 mr-2"></span>
           Autopilot Off
         </span>
       </div>
@@ -88,7 +81,7 @@
           type="button"
         >
           <i class="fas fa-robot mr-2"></i>
-          Autopilot: Off
+          Autopilot
         </button>
 
         <button
@@ -101,10 +94,11 @@
           Export Logs
         </button>
 
+        <!-- BEST-PRACTICE: End Session STOPS the server session -->
         <button
           id="endSessionBtn"
           class="text-red-600 hover:text-red-800 px-3 py-1 rounded-md text-sm font-medium flex items-center"
-          title="Disconnect UI (does not kill local process in v1)"
+          title="End session and stop the running process"
           type="button"
         >
           <i class="fas fa-power-off mr-2"></i>
@@ -117,185 +111,83 @@
     <main class="flex-1 flex overflow-hidden">
       <!-- Terminal Panel -->
       <section class="w-1/2 bg-terminal-bg text-terminal-text font-mono p-4 flex flex-col">
-        <!-- Prompt banner -->
         <div id="promptBanner" class="mb-4 p-3 bg-gray-800 rounded hidden">
           <p id="promptBannerText" class="text-sm text-gray-100">Waiting for input…</p>
-          <div id="promptBannerActions" class="flex flex-wrap gap-2 mt-3">
-            <button
-              id="quickAction1"
-              class="bg-primary-blue hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
-              type="button"
-            >
-              1
-            </button>
-            <button
-              id="quickAction2"
-              class="bg-gray-600 hover:bg-gray-700 text-white px-3 py-1 rounded text-sm"
-              type="button"
-            >
-              2
-            </button>
-            <button
-              id="quickEnter"
-              class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-sm"
-              title="Send Enter"
-              type="button"
-            >
-              Enter
-            </button>
+          <div class="flex gap-2 mt-3">
+            <button id="quickAction1" class="bg-primary-blue text-white px-3 py-1 rounded text-sm">1</button>
+            <button id="quickAction2" class="bg-gray-600 text-white px-3 py-1 rounded text-sm">2</button>
+            <button id="quickEnter" class="bg-gray-700 text-white px-3 py-1 rounded text-sm">Enter</button>
           </div>
         </div>
 
-        <!-- xterm container -->
         <div class="flex-1 overflow-hidden rounded" id="terminalContainer">
-          <div id="xterm" class="h-full w-full"></div>
+          <div id="xterm"></div>
         </div>
 
         <div class="mt-3 text-xs text-gray-400">
-          Tip: click the terminal to focus. Autopilot is policy-guarded and stops on errors.
+          Tip: End Session stops the process and lets you start a new script.
         </div>
       </section>
 
       <!-- AI Panel -->
       <section class="w-1/2 bg-white border-l border-gray-200 flex flex-col">
-        <!-- Tabs -->
         <div class="border-b border-gray-200 flex">
-          <button
-            data-tab="assistant"
-            class="tabBtn px-4 py-3 text-sm font-medium text-primary-blue border-b-2 border-primary-blue"
-            type="button"
-          >
+          <button data-tab="assistant" class="tabBtn px-4 py-3 text-sm font-medium text-primary-blue border-b-2 border-primary-blue">
             Assistant
           </button>
-          <button
-            data-tab="summary"
-            class="tabBtn px-4 py-3 text-sm font-medium text-gray-500 hover:text-gray-700"
-            type="button"
-          >
+          <button data-tab="summary" class="tabBtn px-4 py-3 text-sm font-medium text-gray-500">
             Summary
           </button>
-          <button
-            data-tab="issues"
-            class="tabBtn px-4 py-3 text-sm font-medium text-gray-500 hover:text-gray-700"
-            type="button"
-          >
+          <button data-tab="issues" class="tabBtn px-4 py-3 text-sm font-medium text-gray-500">
             Issues
           </button>
         </div>
 
         <div class="flex-1 overflow-hidden flex flex-col">
-          <!-- Assistant tab -->
-          <div id="tab-assistant" class="tabPanel flex-1 overflow-auto p-6">
+          <div id="tab-assistant" class="flex-1 overflow-auto p-6">
             <div id="statusCard" class="bg-secondary-blue rounded-lg p-4 mb-6">
-              <div class="flex items-center">
-                <div class="w-10 h-10 rounded-full bg-primary-blue flex items-center justify-center text-white mr-3">
-                  <i class="fas fa-info"></i>
-                </div>
-                <div class="min-w-0">
-                  <h3 class="font-medium text-gray-800">Workspace Status</h3>
-                  <p id="statusCardText" class="text-sm text-gray-600 truncate">Connecting…</p>
-                </div>
-              </div>
+              <h3 class="font-medium text-gray-800">Workspace Status</h3>
+              <p id="statusCardText" class="text-sm text-gray-600">Connecting…</p>
             </div>
-
             <div id="aiFeed" class="space-y-3"></div>
           </div>
 
-          <!-- Summary tab -->
-          <div id="tab-summary" class="tabPanel hidden flex-1 overflow-auto p-6">
-            <div class="rounded-lg border border-gray-200 p-4 bg-white">
-              <h3 class="font-medium text-gray-800 mb-2">Deployment Summary</h3>
-              <pre id="summaryPre" class="text-xs bg-gray-50 p-3 rounded overflow-auto whitespace-pre-wrap"></pre>
-            </div>
-          </div>
-
-          <!-- Issues tab -->
-          <div id="tab-issues" class="tabPanel hidden flex-1 overflow-auto p-6">
-            <div class="rounded-lg border border-gray-200 p-4 bg-white">
-              <h3 class="font-medium text-gray-800 mb-2">Detected Issues</h3>
-              <div id="issuesList" class="text-sm text-gray-700 space-y-2">
-                <p class="text-gray-500">No issues detected yet.</p>
-              </div>
-            </div>
-          </div>
-
-          <!-- Chat input -->
-          <div class="border-t border-gray-200 p-4 bg-white">
-            <div class="relative">
-              <input
-                id="aiInput"
-                type="text"
-                placeholder="Ask the assistant..."
-                class="w-full border border-gray-300 rounded-md py-2 px-4 pr-10 focus:outline-none focus:ring-2 focus:ring-primary-blue focus:border-transparent"
-                autocomplete="off"
-              />
-              <button
-                id="aiSendBtn"
-                class="absolute right-2 top-2 text-gray-400 hover:text-primary-blue"
-                title="Send"
-                type="button"
-              >
-                <i class="fas fa-paper-plane"></i>
-              </button>
-            </div>
-            <div class="mt-2 text-xs text-gray-500">
-              AI reads sanitized terminal output and state; it doesn’t execute commands unless Autopilot is enabled.
-            </div>
+          <div class="border-t border-gray-200 p-4">
+            <input
+              id="aiInput"
+              type="text"
+              placeholder="Ask the assistant…"
+              class="w-full border border-gray-300 rounded-md py-2 px-4"
+            />
           </div>
         </div>
       </section>
     </main>
 
-    <!-- Bottom Drawer -->
+    <!-- Timeline Drawer -->
     <footer class="bg-white border-t border-gray-200">
-      <button
-        id="drawerToggle"
-        class="w-full px-4 py-2 text-left text-sm font-medium text-gray-700 hover:bg-gray-50 flex items-center justify-between"
-        type="button"
-      >
+      <button id="drawerToggle" class="w-full px-4 py-2 text-sm text-gray-700 flex justify-between">
         <span>Timeline / Logs</span>
         <i id="drawerIcon" class="fas fa-chevron-up"></i>
       </button>
-
       <div id="drawerContent" class="h-44 overflow-auto p-4 bg-gray-50 hidden">
-        <div id="timeline" class="text-xs font-mono space-y-1 text-gray-700"></div>
+        <div id="timeline" class="text-xs font-mono space-y-1"></div>
       </div>
     </footer>
 
-    <!-- Script Picker Modal (required by app.js) -->
+    <!-- Script Picker Modal -->
     <div id="scriptModal" class="fixed inset-0 bg-black/40 hidden z-50">
-      <div class="h-full w-full flex items-center justify-center p-4">
-        <div class="bg-white rounded-2xl shadow-xl max-w-2xl w-full overflow-hidden">
-          <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-            <div>
-              <div class="text-lg font-semibold text-gray-800">Choose a script to launch</div>
-              <div class="text-xs text-gray-500">This starts the real interactive terminal session.</div>
-            </div>
-            <button id="scriptCancelBtnX" class="text-gray-500 hover:text-gray-800" type="button">
-              <i class="fas fa-times"></i>
-            </button>
+      <div class="h-full flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-xl max-w-2xl w-full">
+          <div class="px-6 py-4 border-b">
+            <div class="text-lg font-semibold">Choose a script to launch</div>
+            <div class="text-xs text-gray-500">This starts a new interactive terminal session.</div>
           </div>
-
           <div class="p-6">
-            <div class="text-sm font-medium text-gray-700 mb-2">Available scripts</div>
             <div id="scriptList" class="space-y-3"></div>
-
-            <div class="mt-4 text-xs text-gray-600" id="scriptSelectedLabel">No script selected</div>
-
-            <div class="mt-5 flex items-center justify-end gap-2">
-              <button
-                id="scriptCancelBtn"
-                class="px-4 py-2 rounded-md border border-gray-200 text-gray-700 hover:bg-gray-50"
-                type="button"
-              >
-                Cancel
-              </button>
-              <button
-                id="scriptStartBtn"
-                class="px-4 py-2 rounded-md bg-primary-blue text-white hover:bg-blue-700 opacity-50 cursor-not-allowed"
-                type="button"
-                disabled
-              >
+            <div class="mt-5 flex justify-end gap-2">
+              <button id="scriptCancelBtn" class="px-4 py-2 border rounded">Cancel</button>
+              <button id="scriptStartBtn" class="px-4 py-2 bg-primary-blue text-white rounded" disabled>
                 Start session
               </button>
             </div>
@@ -304,16 +196,6 @@
       </div>
     </div>
 
-    <!-- IMPORTANT: app.js is NOT a module in this build -->
     <script src="/assets/app.js"></script>
-
-    <!-- Small wiring for the X button (optional convenience) -->
-    <script>
-      (function () {
-        const x = document.getElementById("scriptCancelBtnX");
-        const modal = document.getElementById("scriptModal");
-        if (x && modal) x.addEventListener("click", () => modal.classList.add("hidden"));
-      })();
-    </script>
   </body>
 </html>
