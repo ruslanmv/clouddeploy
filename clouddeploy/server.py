@@ -4,8 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
-from typing import Optional, Set, List, Dict, Any
+from typing import Optional, Set, List, Dict, Any, Tuple
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -16,6 +17,13 @@ from .llm.llm_provider import build_llm
 from .llm.prompts import build_prompts, render_status_prompt
 from .mcp.tools import ToolRegistry
 from .redact import redact_text
+
+# Settings store (file-backed) + redaction
+from .settings import get_store, redact_settings
+
+# NEW: real provider model discovery (OpenAI/Claude/Watsonx/Ollama)
+from .llm.model_catalog import list_models_for_provider
+from .llm.settings import LLMProvider, get_settings
 
 APP_ROOT = Path(__file__).parent
 WEB_DIR = APP_ROOT / "web"
@@ -31,6 +39,15 @@ autopilot_clients: Set[WebSocket] = set()
 # Prevent race conditions between start/stop/autopilot toggles
 _session_lock = asyncio.Lock()
 _autopilot_lock = asyncio.Lock()
+
+# Settings store (file-backed)
+settings_store = get_store()
+
+# ---------------------------------------------------------------------------
+# Models endpoint cache (prevents hammering provider APIs)
+# ---------------------------------------------------------------------------
+_models_cache: Dict[str, Tuple[float, List[str], Optional[str]]] = {}
+MODELS_CACHE_TTL_S = 300  # 5 minutes
 
 
 def _strict_policy() -> Optional[bool]:
@@ -61,10 +78,8 @@ async def _safe_cancel(task: Optional[asyncio.Task]) -> None:
     try:
         await task
     except asyncio.CancelledError:
-        # Expected during shutdown/cancel — swallow to keep server stable.
         pass
     except Exception:
-        # Never let task failure crash WebSocket handler.
         pass
 
 
@@ -84,22 +99,18 @@ async def _cleanup_dead_session_if_needed() -> None:
     if runner is None:
         return
 
-    # Prefer PtyRunner.is_running when available
     try:
         is_running_attr = getattr(runner, "is_running", None)
         if callable(is_running_attr):
             alive = bool(is_running_attr())
         else:
-            # fallback heuristic
             alive = bool(getattr(runner, "pid", None)) and not bool(getattr(runner, "_closed", False))
     except Exception:
-        # If runner inspection fails, do not assume alive.
         alive = False
 
     if alive:
         return
 
-    # Runner is dead -> stop autopilot and clear runner.
     async with _session_lock:
         async with _autopilot_lock:
             autopilot_enabled = False
@@ -111,7 +122,6 @@ async def _cleanup_dead_session_if_needed() -> None:
             await _safe_cancel(autopilot_task)
             autopilot_task = None
 
-        # Best-effort close
         try:
             runner.close()
         except Exception:
@@ -130,12 +140,13 @@ async def _session_status() -> Dict[str, Any]:
     """
     await _cleanup_dead_session_if_needed()
     st = tools.call("session.status", {}) or {}
-
-    # If ToolRegistry says running but runner is missing, correct it.
     if st.get("running") and _get_runner() is None:
         st["running"] = False
-
     return st
+
+
+def _load_settings() -> Dict[str, Any]:
+    return settings_store.load()
 
 
 @app.get("/favicon.ico")
@@ -149,6 +160,68 @@ def index() -> HTMLResponse:
     title = os.getenv("CLOUDDEPLOY_UI_TITLE", "CloudDeploy Enterprise Workspace")
     html = html.replace("CloudDeploy Enterprise Workspace", title)
     return HTMLResponse(html)
+
+
+# -----------------------------------------------------------------------------
+# Settings API (NEW)
+# -----------------------------------------------------------------------------
+
+@app.get("/api/settings")
+def api_settings() -> JSONResponse:
+    s = _load_settings()
+    # UI needs providers list + active provider + config fields (keys masked)
+    return JSONResponse(redact_settings(s))
+
+
+@app.post("/api/settings/provider")
+def api_settings_provider(payload: Dict[str, Any]) -> JSONResponse:
+    provider = str(payload.get("provider") or "").strip().lower()
+    updated = settings_store.update({"provider": provider})
+    return JSONResponse(redact_settings(updated))
+
+
+@app.put("/api/settings/llm")
+def api_settings_llm(payload: Dict[str, Any]) -> JSONResponse:
+    """
+    Update one or more provider sections. We accept partial patches, e.g.
+    { "openai": { "model": "gpt-4o-mini" } }
+    { "provider": "openai", "openai": { "api_key": "..." } }
+    """
+    updated = settings_store.update(payload or {})
+    return JSONResponse(redact_settings(updated))
+
+
+@app.get("/api/settings/models")
+def api_settings_models(provider: str = "") -> JSONResponse:
+    """
+    REAL model listing per provider (not static), cached.
+
+    - OpenAI:    GET /v1/models (requires key)
+    - Claude:    GET /v1/models (requires key)
+    - watsonx:   public model specs (no key required for IBM-managed models)
+    - ollama:    GET /api/tags
+    """
+    p = (provider or "").strip().lower()
+    try:
+        llm_provider = LLMProvider(p)
+    except Exception:
+        return JSONResponse({"ok": False, "error": f"Invalid provider: {provider}"}, status_code=400)
+
+    now = time.time()
+    cached = _models_cache.get(p)
+    if cached and (now - cached[0]) < MODELS_CACHE_TTL_S:
+        _, models, err = cached
+    else:
+        # Uses clouddeploy/llm/settings.py (AppSettings) + provider API calls
+        settings = get_settings()
+        models, err = list_models_for_provider(llm_provider, settings=settings)
+        _models_cache[p] = (now, models, err)
+
+    if err:
+        # Keep response shape stable for UI
+        return JSONResponse({"ok": False, "provider": p, "error": err, "models": []}, status_code=200)
+
+    return JSONResponse({"ok": True, "provider": p, "models": models})
 
 
 # -----------------------------------------------------------------------------
@@ -191,13 +264,7 @@ def api_scripts() -> JSONResponse:
 @app.get("/api/session/status")
 async def api_session_status() -> JSONResponse:
     st = await _session_status()
-    return JSONResponse(
-        {
-            "ok": True,
-            "running": bool(st.get("running")),
-            "command": st.get("command") or "",
-        }
-    )
+    return JSONResponse({"ok": True, "running": bool(st.get("running")), "command": st.get("command") or ""})
 
 
 @app.post("/api/session/stop")
@@ -209,7 +276,6 @@ async def api_session_stop() -> JSONResponse:
     global autopilot_task, autopilot_enabled
 
     async with _session_lock:
-        # 1) Stop autopilot first (stable + no CancelledError leaking)
         async with _autopilot_lock:
             autopilot_enabled = False
             try:
@@ -220,13 +286,11 @@ async def api_session_stop() -> JSONResponse:
             await _safe_cancel(autopilot_task)
             autopilot_task = None
 
-        # 2) Prefer ToolRegistry stop if implemented (safe no-op if missing)
         try:
             tools.call("session.stop", {})
         except Exception:
             pass
 
-        # 3) Hard-stop the PTY runner (best-effort)
         runner = _get_runner()
         if runner is not None:
             try:
@@ -238,7 +302,6 @@ async def api_session_stop() -> JSONResponse:
             except Exception:
                 pass
 
-        # 4) Ensure registry doesn't think it's still running
         try:
             setattr(tools, "_runner", None)
         except Exception:
@@ -288,9 +351,6 @@ async def broadcast_autopilot(event: dict) -> None:
 
 @app.websocket("/ws/terminal")
 async def ws_terminal(ws: WebSocket) -> None:
-    """
-    Terminal output stream. If session not started yet, keep the socket alive.
-    """
     await ws.accept()
     last_sent = ""
 
@@ -325,10 +385,6 @@ async def ws_terminal(ws: WebSocket) -> None:
 
 @app.websocket("/ws/terminal_input")
 async def ws_terminal_input(ws: WebSocket) -> None:
-    """
-    Human typing channel: ONLY works after session has started.
-    Also: bypass strict policy and write directly to PTY runner.
-    """
     await ws.accept()
 
     try:
@@ -400,29 +456,61 @@ async def ws_state(ws: WebSocket) -> None:
             pass
 
 
+def _build_llm_from_settings() -> Any:
+    """
+    Uses file-backed settings to build the LLM provider.
+    If your build_llm() does not accept settings yet, it falls back to env-based build.
+    """
+    s = _load_settings()
+    try:
+        # Preferred: build_llm(settings=s)
+        return build_llm(settings=s)
+    except TypeError:
+        # Backward compatible: old signature build_llm()
+        return build_llm()
+
+
 @app.websocket("/ws/ai")
 async def ws_ai(ws: WebSocket) -> None:
     await ws.accept()
 
-    try:
-        llm = build_llm()
-        prompts = build_prompts(product_name="CloudDeploy", provider_name="IBM Cloud")
-        llm_ok = True
-        llm_err = ""
-    except Exception as e:
-        llm_ok = False
-        llm_err = str(e)
-        llm = None
-        prompts = None
+    prompts = build_prompts(product_name="CloudDeploy", provider_name="IBM Cloud")
+
+    # Track settings version so changes can take effect without server restart.
+    llm = None
+    llm_ok = False
+    llm_err = ""
+    last_version = -1
+
+    async def ensure_llm_loaded() -> None:
+        nonlocal llm, llm_ok, llm_err, last_version
+        s = _load_settings()
+        ver = int(s.get("version") or 0)
+        if llm is not None and ver == last_version and llm_ok:
+            return
+        try:
+            llm = _build_llm_from_settings()
+            llm_ok = True
+            llm_err = ""
+            last_version = ver
+        except Exception as e:
+            llm = None
+            llm_ok = False
+            llm_err = str(e)
+            last_version = ver
 
     try:
         while True:
             question = await ws.receive_text()
 
+            # ensure provider reflects latest /api/settings writes
+            await ensure_llm_loaded()
+
             if not llm_ok:
                 await ws.send_text(
                     "AI is not available on this server right now.\n"
                     f"Reason: {llm_err}\n"
+                    "Tip: open Settings and verify provider credentials.\n"
                     "Terminal still works normally."
                 )
                 continue
@@ -432,8 +520,37 @@ async def ws_ai(ws: WebSocket) -> None:
                 await ws.send_text("No session is running yet. Pick a script to start, then ask me again.")
                 continue
 
-            recent = tools.call("cli.read", {"tail_chars": 4000, "redact": True}).get("text", "")
-            st = tools.call("state.get", {"tail_chars": 6000, "redact": True}).get("state", {}) or {}
+            recent = tools.call("cli.read", {"tail_chars": 6000, "redact": True}).get("text", "") or ""
+            st = tools.call("state.get", {"tail_chars": 12000, "redact": True}).get("state", {}) or {}
+
+            # ---- Evidence gate: avoid hallucinating steps when we have no output ----
+            has_terminal = bool(recent.strip())
+            waiting_for_input = bool(st.get("waiting_for_input"))
+            user_q = (question or "").strip().lower()
+
+            if not has_terminal and not waiting_for_input and user_q in {"hi", "hello", "hey"}:
+                await ws.send_text(
+                    "Hi! I’m connected.\n"
+                    "Start a script from **Choose a script to launch**, and I’ll read the terminal output and guide you."
+                )
+                continue
+
+            if not has_terminal and not waiting_for_input:
+                await ws.send_text(
+                    "I don’t see any terminal output yet.\n"
+                    "Start a script (or run a command in the terminal), then ask me what you want to do next.\n"
+                    "If you paste the last few lines of output, I can help immediately."
+                )
+                continue
+
+            if waiting_for_input:
+                await ws.send_text(
+                    f"I see the workflow is waiting for input.\n"
+                    f"Prompt: {str(st.get('prompt') or '').strip() or '(not provided)'}\n"
+                    f"Choices: {st.get('choices') or []}\n"
+                    "Tell me what you want to choose (or click the quick buttons)."
+                )
+                continue
 
             state_json = json.dumps(st, indent=2, ensure_ascii=False)
             user_prompt = render_status_prompt(
@@ -443,8 +560,16 @@ async def ws_ai(ws: WebSocket) -> None:
                 provider_name="IBM Cloud",
             )
 
+            guardrail = (
+                "IMPORTANT:\n"
+                "- Only claim something is happening if it is explicitly supported by TERMINAL_TAIL or STATE.\n"
+                "- If evidence is missing, say what you cannot see and ask for the next line(s) of output.\n"
+                "- Prefer short, actionable next steps.\n"
+            )
+
             full_prompt = (
                 f"{prompts.system}\n\n"
+                f"{guardrail}\n"
                 f"{prompts.analyze_status}\n\n"
                 f"{user_prompt}\n\n"
                 f"USER_QUESTION:\n{question}\n"
@@ -505,7 +630,6 @@ async def start_autopilot() -> None:
     global autopilot_task, autopilot_enabled
 
     async with _autopilot_lock:
-        # Require a running session; otherwise autopilot does nothing.
         st = await _session_status()
         if not st.get("running"):
             autopilot_enabled = False
@@ -522,7 +646,6 @@ async def start_autopilot() -> None:
         except Exception:
             pass
 
-        # If already running, do nothing
         if autopilot_task and not autopilot_task.done():
             return
 
@@ -544,10 +667,6 @@ async def stop_autopilot() -> None:
 
 
 async def autopilot_loop() -> None:
-    """
-    Autopilot drives the CLI using policy-guarded cli.send.
-    Must never leak CancelledError into ASGI logs.
-    """
     global autopilot_enabled
 
     try:
@@ -557,7 +676,6 @@ async def autopilot_loop() -> None:
 
     try:
         while True:
-            # self-heal session state in case PTY died
             st_run = await _session_status()
             if not autopilot_enabled:
                 break
@@ -622,7 +740,6 @@ async def autopilot_loop() -> None:
             await asyncio.sleep(0.25)
 
     except asyncio.CancelledError:
-        # Key fix: do NOT re-raise; prevents "Exception in ASGI application" logs.
         try:
             await broadcast_autopilot({"type": "autopilot_event", "event": "stopped"})
         except Exception:
