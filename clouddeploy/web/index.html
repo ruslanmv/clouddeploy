@@ -5,8 +5,12 @@
     <base target="_self" />
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
     <title>CloudDeploy Enterprise Workspace</title>
-    <meta name="description" content="CloudDeploy Enterprise Workspace Interface" />
+    <meta
+      name="description"
+      content="CloudDeploy Enterprise Workspace — Terminal + AI Copilot for interactive cloud deployments."
+    />
 
     <!-- Tailwind + Icons -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -18,6 +22,10 @@
     <!-- xterm (CSS + JS GLOBAL) -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
     <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
+
+    <!-- Markdown render + sanitize (AI panel) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 
     <!-- App CSS -->
     <link rel="stylesheet" href="/assets/styles.css" />
@@ -32,9 +40,33 @@
               "primary-blue": "#0062ff",
               "secondary-blue": "#e6f0ff",
               "status-running": "#00a86b",
+              "status-warn": "#ffb020",
             },
             fontFamily: {
-              mono: ['"Courier New"', "monospace"],
+              mono: [
+                "ui-monospace",
+                "SFMono-Regular",
+                "Menlo",
+                "Monaco",
+                "Consolas",
+                '"Liberation Mono"',
+                '"Courier New"',
+                "monospace",
+              ],
+              sans: [
+                "ui-sans-serif",
+                "system-ui",
+                "-apple-system",
+                "Segoe UI",
+                "Roboto",
+                "Helvetica",
+                "Arial",
+                "Apple Color Emoji",
+                "Segoe UI Emoji",
+              ],
+            },
+            boxShadow: {
+              soft: "0 10px 30px rgba(0,0,0,0.08)",
             },
           },
         },
@@ -44,22 +76,48 @@
     <style>
       #terminalContainer { min-height: 240px; }
       #xterm { height: 100%; width: 100%; }
+
+      /* Better Markdown typography in assistant panel (Tailwind prose is used by app.js) */
+      .prose code { padding: 0.1rem 0.25rem; border-radius: 0.375rem; background: #f3f4f6; }
+      .prose pre { background: #0b1020; color: #e5e7eb; padding: 0.75rem; border-radius: 0.75rem; overflow: auto; }
+      .prose pre code { background: transparent; padding: 0; }
+      .prose a { color: #0062ff; text-decoration: underline; }
+
+      /* Modal animation (subtle) */
+      .modal-card { transform: translateY(6px); opacity: 0; transition: all 120ms ease; }
+      .modal-open .modal-card { transform: translateY(0); opacity: 1; }
     </style>
   </head>
 
-  <body class="h-screen flex flex-col bg-gray-50 overflow-hidden">
+  <!-- ↑ Increased baseline readability: text-base -->
+  <body class="h-screen flex flex-col bg-gray-50 overflow-hidden font-sans text-base">
     <!-- Header -->
     <header class="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between">
-      <div class="flex items-center space-x-4 min-w-0">
-        <h1 class="text-xl font-bold text-gray-800 whitespace-nowrap">CloudDeploy</h1>
+      <div class="flex items-center space-x-3 min-w-0">
+        <div class="flex items-center gap-3 min-w-0">
+          <div class="w-9 h-9 rounded-xl bg-blue-50 flex items-center justify-center text-primary-blue">
+            <i class="fas fa-cloud"></i>
+          </div>
+          <div class="min-w-0">
+            <!-- ↑ title larger -->
+            <h1 class="text-xl font-semibold text-gray-900 leading-tight whitespace-nowrap">
+              CloudDeploy
+            </h1>
+            <!-- ↑ subtitle larger (was text-xs) -->
+            <div class="text-sm text-gray-500 truncate">
+              Terminal + AI Workspace for Cloud Deployments
+            </div>
+          </div>
+        </div>
 
-        <span class="bg-gray-100 text-gray-600 px-3 py-1 rounded-full text-sm font-medium">
-          IBM Cloud
+        <!-- ↑ pill larger (was text-xs) -->
+        <span class="hidden md:inline-flex bg-gray-100 text-gray-700 px-3 py-1 rounded-full text-sm font-medium">
+          IBM Cloud (v1)
         </span>
 
         <span
           id="runtimePill"
-          class="bg-gray-200 bg-opacity-50 text-gray-700 px-3 py-1 rounded-full text-sm font-medium flex items-center"
+          class="bg-gray-200 bg-opacity-50 text-gray-700 px-3 py-1 rounded-full text-base font-medium flex items-center whitespace-nowrap"
         >
           <span class="w-2 h-2 rounded-full bg-gray-400 mr-2"></span>
           Connecting…
@@ -67,16 +125,27 @@
 
         <span
           id="autopilotPill"
-          class="bg-gray-200 bg-opacity-50 text-gray-700 px-3 py-1 rounded-full text-sm font-medium"
+          class="bg-gray-200 bg-opacity-50 text-gray-700 px-3 py-1 rounded-full text-base font-medium whitespace-nowrap"
         >
           Autopilot Off
         </span>
       </div>
 
-      <div class="flex items-center space-x-3">
+      <div class="flex items-center space-x-2">
+        <!-- Settings -->
+        <button
+          id="settingsBtn"
+          class="bg-gray-100 text-gray-700 hover:bg-gray-200 px-3 py-2 rounded-md text-base font-medium flex items-center"
+          title="Settings (LLM provider, model, keys)"
+          type="button"
+        >
+          <i class="fas fa-cog mr-2"></i>
+          Settings
+        </button>
+
         <button
           id="autopilotBtn"
-          class="bg-gray-100 text-gray-700 hover:bg-gray-200 px-3 py-1 rounded-md text-sm font-medium flex items-center"
+          class="bg-gray-100 text-gray-700 hover:bg-gray-200 px-3 py-2 rounded-md text-base font-medium flex items-center"
           title="Toggle autopilot (safe, policy-guarded)"
           type="button"
         >
@@ -86,7 +155,7 @@
 
         <button
           id="exportLogsBtn"
-          class="text-gray-600 hover:text-gray-800 px-3 py-1 rounded-md text-sm font-medium flex items-center"
+          class="text-gray-600 hover:text-gray-800 px-3 py-2 rounded-md text-base font-medium flex items-center"
           title="Download terminal logs from this session"
           type="button"
         >
@@ -94,11 +163,10 @@
           Export Logs
         </button>
 
-        <!-- BEST-PRACTICE: End Session STOPS the server session -->
         <button
           id="endSessionBtn"
-          class="text-red-600 hover:text-red-800 px-3 py-1 rounded-md text-sm font-medium flex items-center"
-          title="End session and stop the running process"
+          class="text-red-600 hover:text-red-800 px-3 py-2 rounded-md text-base font-medium flex items-center"
+          title="Switch to a new session (safe). Old session stops only when you start the new one."
           type="button"
         >
           <i class="fas fa-power-off mr-2"></i>
@@ -107,58 +175,119 @@
       </div>
     </header>
 
-    <!-- Main Content -->
+    <!-- Main -->
     <main class="flex-1 flex overflow-hidden">
       <!-- Terminal Panel -->
       <section class="w-1/2 bg-terminal-bg text-terminal-text font-mono p-4 flex flex-col">
-        <div id="promptBanner" class="mb-4 p-3 bg-gray-800 rounded hidden">
-          <p id="promptBannerText" class="text-sm text-gray-100">Waiting for input…</p>
-          <div class="flex gap-2 mt-3">
-            <button id="quickAction1" class="bg-primary-blue text-white px-3 py-1 rounded text-sm">1</button>
-            <button id="quickAction2" class="bg-gray-600 text-white px-3 py-1 rounded text-sm">2</button>
-            <button id="quickEnter" class="bg-gray-700 text-white px-3 py-1 rounded text-sm">Enter</button>
+        <div id="promptBanner" class="mb-4 p-4 bg-gray-800 rounded-xl hidden border border-gray-700">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <!-- ↑ (was text-xs) -->
+              <p class="text-sm text-gray-300">Action required</p>
+              <!-- ↑ (was text-sm) -->
+              <p id="promptBannerText" class="text-base text-gray-100 mt-1">Waiting for input…</p>
+            </div>
+            <!-- ↑ (was text-xs) -->
+            <span class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-200 whitespace-nowrap">
+              Interactive prompt
+            </span>
+          </div>
+
+          <div class="flex flex-wrap gap-2 mt-3">
+            <!-- ↑ (was text-sm) -->
+            <button id="quickAction1" class="bg-primary-blue hover:opacity-90 text-white px-4 py-2 rounded-md text-base">
+              1
+            </button>
+            <button id="quickAction2" class="bg-gray-600 hover:bg-gray-500 text-white px-4 py-2 rounded-md text-base">
+              2
+            </button>
+            <button id="quickEnter" class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-md text-base">
+              Enter
+            </button>
           </div>
         </div>
 
-        <div class="flex-1 overflow-hidden rounded" id="terminalContainer">
+        <div class="flex-1 overflow-hidden rounded-xl border border-gray-800" id="terminalContainer">
           <div id="xterm"></div>
         </div>
 
-        <div class="mt-3 text-xs text-gray-400">
-          Tip: End Session stops the process and lets you start a new script.
+        <!-- ↑ (was text-xs) -->
+        <div class="mt-3 text-sm text-gray-300 flex items-center justify-between gap-3">
+          <span class="truncate">
+            Tip: Use <span class="text-gray-100">Autopilot</span> only for wizard prompts. It stops on errors.
+          </span>
+          <span class="hidden md:inline-flex items-center gap-2">
+            <i class="fas fa-shield-alt text-gray-200"></i>
+            Policy-guarded
+          </span>
         </div>
       </section>
 
       <!-- AI Panel -->
       <section class="w-1/2 bg-white border-l border-gray-200 flex flex-col">
         <div class="border-b border-gray-200 flex">
-          <button data-tab="assistant" class="tabBtn px-4 py-3 text-sm font-medium text-primary-blue border-b-2 border-primary-blue">
+          <!-- ↑ tabs larger (was text-sm) -->
+          <button
+            data-tab="assistant"
+            class="tabBtn px-4 py-3 text-base font-semibold text-primary-blue border-b-2 border-primary-blue"
+            type="button"
+          >
             Assistant
           </button>
-          <button data-tab="summary" class="tabBtn px-4 py-3 text-sm font-medium text-gray-500">
+          <button
+            data-tab="summary"
+            class="tabBtn px-4 py-3 text-base font-medium text-gray-600"
+            type="button"
+          >
             Summary
           </button>
-          <button data-tab="issues" class="tabBtn px-4 py-3 text-sm font-medium text-gray-500">
+          <button
+            data-tab="issues"
+            class="tabBtn px-4 py-3 text-base font-medium text-gray-600"
+            type="button"
+          >
             Issues
           </button>
         </div>
 
         <div class="flex-1 overflow-hidden flex flex-col">
           <div id="tab-assistant" class="flex-1 overflow-auto p-6">
-            <div id="statusCard" class="bg-secondary-blue rounded-lg p-4 mb-6">
-              <h3 class="font-medium text-gray-800">Workspace Status</h3>
-              <p id="statusCardText" class="text-sm text-gray-600">Connecting…</p>
+            <div id="statusCard" class="bg-secondary-blue rounded-2xl p-5 mb-6 border border-blue-100">
+              <div class="flex items-start justify-between gap-4">
+                <div>
+                  <!-- ↑ (was default) -->
+                  <h3 class="text-lg font-semibold text-gray-900">Workspace Status</h3>
+                  <!-- ↑ (was text-sm) -->
+                  <p id="statusCardText" class="text-base text-gray-700 mt-1">
+                    Connecting…
+                  </p>
+                </div>
+                <!-- ↑ (was text-xs) -->
+                <div class="text-sm text-blue-700 bg-white/70 px-3 py-1 rounded-lg border border-blue-100 whitespace-nowrap">
+                  Live
+                </div>
+              </div>
             </div>
-            <div id="aiFeed" class="space-y-3"></div>
+
+            <div id="aiFeed" class="space-y-4"></div>
           </div>
 
-          <div class="border-t border-gray-200 p-4">
+          <div class="border-t border-gray-200 p-4 flex items-center gap-2">
             <input
               id="aiInput"
               type="text"
-              placeholder="Ask the assistant…"
-              class="w-full border border-gray-300 rounded-md py-2 px-4"
+              placeholder="Ask the assistant… (Markdown supported)"
+              class="flex-1 border border-gray-300 rounded-md py-3 px-4 focus:outline-none focus:ring-2 focus:ring-blue-200 text-base"
+              autocomplete="off"
             />
+            <button
+              id="aiSendBtn"
+              type="button"
+              class="bg-primary-blue text-white px-5 py-3 rounded-md text-base font-medium hover:opacity-95"
+              title="Send"
+            >
+              <i class="fas fa-paper-plane"></i>
+            </button>
           </div>
         </div>
       </section>
@@ -166,33 +295,324 @@
 
     <!-- Timeline Drawer -->
     <footer class="bg-white border-t border-gray-200">
-      <button id="drawerToggle" class="w-full px-4 py-2 text-sm text-gray-700 flex justify-between">
-        <span>Timeline / Logs</span>
+      <!-- ↑ (was text-sm) -->
+      <button
+        id="drawerToggle"
+        class="w-full px-4 py-3 text-base text-gray-700 flex justify-between items-center hover:bg-gray-50"
+        type="button"
+      >
+        <span class="flex items-center gap-2">
+          <i class="fas fa-stream text-gray-500"></i>
+          Timeline / Logs
+        </span>
         <i id="drawerIcon" class="fas fa-chevron-up"></i>
       </button>
       <div id="drawerContent" class="h-44 overflow-auto p-4 bg-gray-50 hidden">
-        <div id="timeline" class="text-xs font-mono space-y-1"></div>
+        <!-- ↑ (was text-xs) -->
+        <div id="timeline" class="text-sm font-mono space-y-2"></div>
       </div>
     </footer>
 
     <!-- Script Picker Modal -->
     <div id="scriptModal" class="fixed inset-0 bg-black/40 hidden z-50">
-      <div class="h-full flex items-center justify-center p-4">
-        <div class="bg-white rounded-2xl shadow-xl max-w-2xl w-full">
-          <div class="px-6 py-4 border-b">
-            <div class="text-lg font-semibold">Choose a script to launch</div>
-            <div class="text-xs text-gray-500">This starts a new interactive terminal session.</div>
+      <div class="h-full flex items-center justify-center p-4 modal-open">
+        <div class="bg-white rounded-2xl shadow-soft max-w-2xl w-full modal-card">
+          <div class="px-6 py-4 border-b flex items-start justify-between gap-4">
+            <div>
+              <div class="text-xl font-semibold text-gray-900">Choose a script to launch</div>
+              <div class="text-sm text-gray-500 mt-1">
+                This starts a new interactive terminal session (PTY-backed).
+              </div>
+              <div id="scriptSelectedLabel" class="text-sm text-gray-400 mt-2">
+                No script selected
+              </div>
+            </div>
+            <button
+              id="scriptCancelBtnX"
+              type="button"
+              class="text-gray-500 hover:text-gray-900 px-2 py-1 rounded-md text-lg"
+              aria-label="Close"
+              title="Close"
+            >
+              ✕
+            </button>
           </div>
+
           <div class="p-6">
             <div id="scriptList" class="space-y-3"></div>
+
             <div class="mt-5 flex justify-end gap-2">
-              <button id="scriptCancelBtn" class="px-4 py-2 border rounded">Cancel</button>
-              <button id="scriptStartBtn" class="px-4 py-2 bg-primary-blue text-white rounded" disabled>
+              <button id="scriptCancelBtn" class="px-5 py-3 border border-gray-200 rounded-md hover:bg-gray-50 text-base" type="button">
+                Cancel
+              </button>
+              <button
+                id="scriptStartBtn"
+                class="px-5 py-3 bg-primary-blue text-white rounded-md font-medium hover:opacity-95 text-base"
+                type="button"
+                disabled
+              >
                 Start session
               </button>
             </div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Settings Modal (LLM Provider) -->
+    <div id="settingsModal" class="fixed inset-0 bg-black/40 hidden z-50">
+      <div class="h-full flex items-center justify-center p-4 modal-open">
+        <div class="bg-white rounded-2xl shadow-soft max-w-2xl w-full modal-card">
+          <div class="px-6 py-4 border-b flex items-start justify-between gap-4">
+            <div>
+              <div class="text-xl font-semibold text-gray-900">Settings</div>
+              <div class="text-sm text-gray-500 mt-1">
+                Configure the LLM provider used by CloudDeploy. Keys are stored server-side.
+              </div>
+            </div>
+            <button
+              id="settingsCloseBtn"
+              type="button"
+              class="text-gray-500 hover:text-gray-900 px-2 py-1 rounded-md text-lg"
+              aria-label="Close settings"
+              title="Close"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div class="p-6 space-y-6">
+            <!-- Provider -->
+            <div class="bg-gray-50 border border-gray-200 rounded-2xl p-5">
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <div class="text-base font-semibold text-gray-900">Active provider</div>
+                  <div class="text-sm text-gray-500">Choose which provider powers the AI chat.</div>
+                </div>
+                <select
+                  id="settingsProviderSelect"
+                  class="border border-gray-300 rounded-md px-3 py-2 text-base bg-white min-w-[160px]"
+                ></select>
+              </div>
+
+              <div class="mt-3 flex items-center gap-2">
+                <button
+                  id="settingsLoadModelsBtn"
+                  type="button"
+                  class="px-4 py-3 border border-gray-200 rounded-md text-base hover:bg-white"
+                  title="Fetch available models (best-effort)"
+                >
+                  Display models
+                </button>
+
+                <select
+                  id="settingsModelsSelect"
+                  class="border border-gray-300 rounded-md px-3 py-3 text-base bg-white flex-1"
+                  title="Select a model (optional)"
+                >
+                  <option value="">-- select a model --</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- OpenAI -->
+            <div id="settingsOpenaiSection" class="hidden">
+              <div class="text-base font-semibold text-gray-900 mb-2">OpenAI</div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label class="text-sm text-gray-600">API Key</label>
+                  <input
+                    id="openaiApiKey"
+                    type="password"
+                    placeholder="sk-..."
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                  <div class="text-sm text-gray-400 mt-1">Leave unchanged unless updating.</div>
+                </div>
+                <div>
+                  <label class="text-sm text-gray-600">Model</label>
+                  <input
+                    id="openaiModel"
+                    type="text"
+                    placeholder="gpt-4o-mini"
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                  <div class="text-sm text-gray-400 mt-1">Example: gpt-4o, gpt-4o-mini</div>
+                </div>
+                <div class="md:col-span-2">
+                  <label class="text-sm text-gray-600">Base URL (optional)</label>
+                  <input
+                    id="openaiBaseUrl"
+                    type="text"
+                    placeholder="https://api.openai.com"
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- Claude -->
+            <div id="settingsClaudeSection" class="hidden">
+              <div class="text-base font-semibold text-gray-900 mb-2">Claude (Anthropic)</div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label class="text-sm text-gray-600">API Key</label>
+                  <input
+                    id="claudeApiKey"
+                    type="password"
+                    placeholder="sk-ant-..."
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                  <div class="text-sm text-gray-400 mt-1">Leave unchanged unless updating.</div>
+                </div>
+                <div>
+                  <label class="text-sm text-gray-600">Model</label>
+                  <input
+                    id="claudeModel"
+                    type="text"
+                    placeholder="claude-sonnet-4-5"
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                  <div class="text-sm text-gray-400 mt-1">Example: claude-sonnet-4-5</div>
+                </div>
+                <div class="md:col-span-2">
+                  <label class="text-sm text-gray-600">Base URL (optional)</label>
+                  <input
+                    id="claudeBaseUrl"
+                    type="text"
+                    placeholder="https://api.anthropic.com"
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- Watsonx -->
+            <div id="settingsWatsonxSection" class="hidden">
+              <div class="text-base font-semibold text-gray-900 mb-2">IBM watsonx.ai</div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label class="text-sm text-gray-600">API Key</label>
+                  <input
+                    id="watsonxApiKey"
+                    type="password"
+                    placeholder="Your watsonx API key"
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                  <div class="text-sm text-gray-400 mt-1">Leave unchanged unless updating.</div>
+                </div>
+                <div>
+                  <label class="text-sm text-gray-600">Project ID</label>
+                  <input
+                    id="watsonxProjectId"
+                    type="text"
+                    placeholder="Your project id"
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="text-sm text-gray-600">Model ID</label>
+                  <input
+                    id="watsonxModelId"
+                    type="text"
+                    placeholder="ibm/granite-3-8b-instruct"
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="text-sm text-gray-600">Base URL</label>
+                  <input
+                    id="watsonxBaseUrl"
+                    type="text"
+                    placeholder="https://us-south.ml.cloud.ibm.com"
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- Ollama -->
+            <div id="settingsOllamaSection" class="hidden">
+              <div class="text-base font-semibold text-gray-900 mb-2">Ollama (Local)</div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div class="md:col-span-2">
+                  <label class="text-sm text-gray-600">Base URL</label>
+                  <input
+                    id="ollamaBaseUrl"
+                    type="text"
+                    placeholder="http://localhost:11434"
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                </div>
+                <div class="md:col-span-2">
+                  <label class="text-sm text-gray-600">Model</label>
+                  <input
+                    id="ollamaModel"
+                    type="text"
+                    placeholder="llama3"
+                    class="w-full border border-gray-300 rounded-md px-3 py-3 text-base"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-center justify-between gap-3">
+              <div class="text-sm">
+                <div id="settingsSavedText" class="text-green-700 font-medium"></div>
+                <div id="settingsErrorText" class="text-red-600 font-medium"></div>
+              </div>
+
+              <div class="flex items-center gap-2">
+                <button
+                  id="settingsSaveBtn"
+                  type="button"
+                  class="px-5 py-3 bg-primary-blue text-white rounded-md font-medium hover:opacity-95 text-base"
+                >
+                  Save settings
+                </button>
+              </div>
+            </div>
+
+            <div class="text-sm text-gray-500">
+              Security note: the UI never executes AI HTML directly. Markdown is sanitized with DOMPurify.
+              API keys are never printed in logs.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <!-- ↑ footer larger (was text-xs) -->
+    <div class="bg-white border-t border-gray-200 px-6 py-3 flex items-center justify-between text-sm text-gray-500">
+      <div class="flex items-center gap-3">
+        <a
+          href="https://github.com/ruslanmv/CloudDeploy"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="hover:text-gray-800 flex items-center gap-2"
+        >
+          <span>⭐ Star our GitHub</span>
+        </a>
+      </div>
+      <div class="flex items-center gap-4">
+        <span>© 2025 CloudDeploy</span>
+        <a
+          href="https://github.com/ruslanmv/CloudDeploy"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="hover:text-gray-800"
+        >
+          Docs
+        </a>
+        <a
+          href="https://github.com/ruslanmv/CloudDeploy"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="hover:text-gray-800"
+        >
+          GitHub
+        </a>
       </div>
     </div>
 
