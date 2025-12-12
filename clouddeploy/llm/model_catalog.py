@@ -46,7 +46,7 @@ def _list_openai_models(settings: AppSettings) -> Tuple[List[str], Optional[str]
     if not api_key:
         return [], "OpenAI API key not configured"
 
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com")
+    base_url = (settings.openai.base_url or os.getenv("OPENAI_BASE_URL") or "https://api.openai.com")
     url = f"{base_url.rstrip('/')}/v1/models"
 
     try:
@@ -72,7 +72,7 @@ def _list_claude_models(settings: AppSettings) -> Tuple[List[str], Optional[str]
     if not api_key:
         return [], "Claude (Anthropic) API key not configured"
 
-    base_url = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    base_url = (settings.claude.base_url or os.getenv("ANTHROPIC_BASE_URL") or "https://api.anthropic.com")
     url = f"{base_url.rstrip('/')}/v1/models"
     anthropic_version = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
 
