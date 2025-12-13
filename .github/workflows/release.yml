@@ -1,6 +1,4 @@
 # .github/workflows/release.yml
-# Build distributions on GitHub Release and publish to PyPI (Trusted Publishers)
-
 name: Build & Publish to PyPI
 
 on:
@@ -8,8 +6,8 @@ on:
     types: [published]
 
 permissions:
-  contents: write   # upload assets to GitHub release
-  id-token: write   # required for PyPI Trusted Publishing (OIDC)
+  contents: write
+  id-token: write
 
 jobs:
   build:
@@ -23,26 +21,41 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          # Match pyproject.toml: requires-python = ">=3.11,<3.12"
           python-version: "3.11"
           cache: "pip"
 
-      - name: Set up Node.js
+      # ------------------------------------------------------------
+      # Frontend build (OPTIONAL)
+      #
+      # Your repo does NOT have ./frontend/ — it has ./clouddeploy/web.
+      # So we only do Node steps if ./frontend/package.json exists.
+      # This prevents setup-node cache errors.
+      # ------------------------------------------------------------
+      - name: Set up Node.js (only if ./frontend exists)
+        if: ${{ hashFiles('frontend/package.json') != '' }}
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
+
+      - name: Cache npm (frontend)
+        if: ${{ hashFiles('frontend/package-lock.json') != '' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-frontend-${{ hashFiles('frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-frontend-
 
       - name: Install frontend dependencies
-        run: |
-          cd frontend
-          npm ci
+        if: ${{ hashFiles('frontend/package.json') != '' }}
+        working-directory: frontend
+        run: npm ci
 
       - name: Build frontend
-        run: |
-          cd frontend
-          npm run build
+        if: ${{ hashFiles('frontend/package.json') != '' }}
+        working-directory: frontend
+        run: npm run build
+      # ------------------------------------------------------------
 
       - name: Install Python build tooling
         run: |
@@ -72,7 +85,7 @@ jobs:
     needs: build
     environment:
       name: pypi
-      url: https://pypi.org/project/gitcopilot/
+      url: https://pypi.org/project/clouddeploy/
 
     steps:
       - name: Download artifacts
