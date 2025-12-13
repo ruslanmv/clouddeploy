@@ -7,7 +7,7 @@
 ![License](https://img.shields.io/badge/License-Apache--2.0-green)
 ![Open Source](https://img.shields.io/badge/Open%20Source-Yes-orange)
 
-![](assets/2025-12-12-16-06-20.png)
+![](assets/2025-12-13-01-29-37.png)
 
 If you've ever lost hours to "works on my machine" deployments, interactive CLIs, missing env vars, or confusing cloud logs — **CloudDeploy** is for you.
 
