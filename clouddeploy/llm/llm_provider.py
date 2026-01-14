@@ -63,6 +63,8 @@ def build_llm(settings: Optional[dict] = None) -> LLM:
             model=model,
             api_key=api_key,
             base_url=base_url or None,
+            temperature=0.2,     # Strict for JSON
+            max_tokens=2048,     # Ensure enough space for plans
         )
 
     # -------------------------
@@ -91,6 +93,8 @@ def build_llm(settings: Optional[dict] = None) -> LLM:
             model=model,
             api_key=api_key,
             base_url=base_url or None,
+            temperature=0.2,
+            max_tokens=4096,
         )
 
     # -------------------------
@@ -117,14 +121,13 @@ def build_llm(settings: Optional[dict] = None) -> LLM:
 
         model = _ensure_prefix(model_id, "watsonx/")
 
-        # NOTE: CrewAI's LLM signature may vary by version. This matches your existing usage.
         return LLM(
             model=model,
             api_key=api_key,
             base_url=base_url,
             project_id=project_id,
-            temperature=0.3,
-            max_tokens=1024,
+            temperature=0.2, # Lowered to 0.2 for better JSON strictness
+            max_tokens=1024, # Good default for plans
         )
 
     # -------------------------
@@ -134,6 +137,11 @@ def build_llm(settings: Optional[dict] = None) -> LLM:
         model = (cfg.ollama.model or os.getenv("GITPILOT_OLLAMA_MODEL", "llama3")).strip()
         base_url = (cfg.ollama.base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).strip()
 
+        # Safely access the new settings (defaults are safe if Pydantic model isn't updated yet)
+        temp = getattr(cfg.ollama, "temperature", 0.1)
+        # Map 'num_predict' (Ollama term) to 'max_tokens' (CrewAI term)
+        max_tokens = getattr(cfg.ollama, "num_predict", 1024)
+
         if not base_url:
             raise ValueError(
                 "Ollama base URL is required. Configure it in Settings or set OLLAMA_BASE_URL."
@@ -141,9 +149,12 @@ def build_llm(settings: Optional[dict] = None) -> LLM:
 
         model = _ensure_prefix(model, "ollama/")
 
+        # CRITICAL FIX: Pass max_tokens and temperature to CrewAI
         return LLM(
             model=model,
             base_url=base_url,
+            temperature=temp,
+            max_tokens=max_tokens
         )
 
     raise ValueError(f"Unsupported provider: {provider}")

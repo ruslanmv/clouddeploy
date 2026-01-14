@@ -53,18 +53,18 @@
       ok ? "bg-status-running" : "bg-red-500"
     } mr-2"></span>${text}`;
     pill.className = ok
-      ? "bg-status-running bg-opacity-10 text-status-running px-3 py-1 rounded-full text-sm font-medium flex items-center whitespace-nowrap"
-      : "bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm font-medium flex items-center whitespace-nowrap";
+      ? "bg-status-running bg-opacity-10 text-status-running px-3 py-1 rounded-full font-medium flex items-center whitespace-nowrap"
+      : "bg-red-100 text-red-700 px-3 py-1 rounded-full font-medium flex items-center whitespace-nowrap";
   }
 
   // -----------------------------
   // Markdown rendering (AI messages)
   // -----------------------------
   function renderMarkdownSafe(md) {
-    if (!window.marked || !window.DOMPurify) return md; // Fallback to text if missing
+    if (!window.marked || !window.DOMPurify) return md; 
     try {
-      // Configure marked for better breaks if needed
-      // window.marked.setOptions({ breaks: true }); 
+      // Configure marked to handle breaks nicely
+      // window.marked.setOptions({ breaks: true });
       const rawHtml = window.marked.parse(md || "");
       return window.DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true } });
     } catch (e) {
@@ -80,8 +80,8 @@
     const box = document.createElement("div");
     box.className =
       who === "user"
-        ? "rounded-lg border border-gray-200 p-3 bg-white text-sm text-gray-800"
-        : "rounded-lg border border-gray-200 p-3 bg-gray-50 text-sm text-gray-800 prose prose-sm max-w-none";
+        ? "rounded-lg border border-gray-200 p-3 bg-white text-gray-800"
+        : "rounded-lg border border-gray-200 p-3 bg-gray-50 text-gray-800 prose prose-sm max-w-none";
 
     if (who === "assistant") {
       const html = renderMarkdownSafe(text);
@@ -123,7 +123,7 @@
   }
 
   // ----------------------------------------------------------------------------
-  // Settings Modal (FIXED: NO PAGE RELOAD)
+  // Settings Modal (FIXED: NO PAGE RELOAD + Text Size)
   // ----------------------------------------------------------------------------
   function createSettingsController() {
     const modal = $("#settingsModal");
@@ -133,6 +133,9 @@
     const providerSelect = $("#settingsProviderSelect");
     const loadModelsBtn = $("#settingsLoadModelsBtn");
     const modelsSelect = $("#settingsModelsSelect");
+
+    // NEW: Text Size Select
+    const textSizeSelect = $("#uiTextSizeSelect");
 
     const saveBtn = $("#settingsSaveBtn");
     const errText = $("#settingsErrorText");
@@ -184,7 +187,12 @@
       if (!modal) return;
       modal.classList.remove("hidden");
       modal.classList.add("pointer-events-auto");
+      
+      // Load current client-side preferences
+      const savedSize = localStorage.getItem('cloudDeploy_textSize') || 'md';
+      if(textSizeSelect) textSizeSelect.value = savedSize;
     }
+    
     function close() {
       if (!modal) return;
       modal.classList.add("hidden");
@@ -210,23 +218,20 @@
         providerSelect.value = p;
       }
 
-      // OpenAI
+      // Fill existing inputs
       if (inputs.openai.key) inputs.openai.key.value = settings.openai?.api_key || "";
       if (inputs.openai.model) inputs.openai.model.value = settings.openai?.model || "";
       if (inputs.openai.base) inputs.openai.base.value = settings.openai?.base_url || "";
 
-      // Claude
       if (inputs.claude.key) inputs.claude.key.value = settings.claude?.api_key || "";
       if (inputs.claude.model) inputs.claude.model.value = settings.claude?.model || "";
       if (inputs.claude.base) inputs.claude.base.value = settings.claude?.base_url || "";
 
-      // Watsonx
       if (inputs.watsonx.key) inputs.watsonx.key.value = settings.watsonx?.api_key || "";
       if (inputs.watsonx.project) inputs.watsonx.project.value = settings.watsonx?.project_id || "";
       if (inputs.watsonx.model) inputs.watsonx.model.value = settings.watsonx?.model_id || "";
       if (inputs.watsonx.base) inputs.watsonx.base.value = settings.watsonx?.base_url || "";
 
-      // Ollama
       if (inputs.ollama.base) inputs.ollama.base.value = settings.ollama?.base_url || "";
       if (inputs.ollama.model) inputs.ollama.model.value = settings.ollama?.model || "";
 
@@ -280,7 +285,6 @@
 
         modelsCache[p] = data.models || [];
         
-        // Populate select
         if (modelsSelect) {
           modelsSelect.innerHTML = `<option value="">-- select a model --</option>`;
           modelsCache[p].forEach((m) => {
@@ -354,6 +358,14 @@
       showError("");
       showSaved("");
 
+      // 1. Save Text Size Client-Side
+      if (textSizeSelect) {
+        const size = textSizeSelect.value;
+        localStorage.setItem('cloudDeploy_textSize', size);
+        document.body.setAttribute('data-ui-textsize', size);
+      }
+
+      // 2. Save LLM Settings Server-Side
       try {
         const patch = buildPatchFromForm();
         const res = await fetch("/api/settings/llm", {
@@ -365,11 +377,11 @@
         if (!res.ok) throw new Error(data.error || "Failed to save settings");
 
         settings = data;
-        fillFormFromSettings(); // refresh UI with server values
+        fillFormFromSettings(); 
         showSaved("Saved ✅");
-        timeline("LLM settings saved successfully.", "success");
+        timeline("Settings saved successfully.", "success");
 
-        // Close modal after brief delay (no reload!)
+        // NO RELOAD - Just close modal after a delay
         setTimeout(() => {
             close();
             showSaved(""); 
@@ -394,6 +406,11 @@
     providerSelect?.addEventListener("change", (e) => changeProvider(e?.target?.value));
     loadModelsBtn?.addEventListener("click", loadModels);
     
+    // Live update text size preview
+    textSizeSelect?.addEventListener("change", (e) => {
+        document.body.setAttribute('data-ui-textsize', e.target.value);
+    });
+
     modelsSelect?.addEventListener("change", (e) => {
       if (!settings) return;
       const p = settings.provider;
@@ -500,6 +517,50 @@
 
   document.addEventListener("DOMContentLoaded", async () => {
     // -----------------------------
+    // INIT: Text Size
+    // -----------------------------
+    const savedSize = localStorage.getItem('cloudDeploy_textSize') || 'md';
+    document.body.setAttribute('data-ui-textsize', savedSize);
+
+    // -----------------------------
+    // INIT: Column Resizer
+    // -----------------------------
+    const dragHandle = document.getElementById('dragHandle');
+    const container = document.getElementById('mainSplitter'); 
+    const leftPanel = document.getElementById('leftPanel');
+    const rightPanel = document.getElementById('rightPanel');
+    let isDragging = false;
+
+    if (dragHandle && container && leftPanel && rightPanel) {
+      dragHandle.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        document.body.classList.add('resizing');
+        dragHandle.classList.add('dragging');
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const containerRect = container.getBoundingClientRect();
+        let newLeftWidth = ((e.clientX - containerRect.left) / containerRect.width) * 100;
+        if (newLeftWidth < 20) newLeftWidth = 20;
+        if (newLeftWidth > 80) newLeftWidth = 80;
+        leftPanel.style.width = `${newLeftWidth}%`;
+        rightPanel.style.width = `${100 - newLeftWidth}%`;
+        // Trigger resize event for xterm fit addon
+        window.dispatchEvent(new Event('resize'));
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (isDragging) {
+          isDragging = false;
+          document.body.classList.remove('resizing');
+          dragHandle.classList.remove('dragging');
+          window.dispatchEvent(new Event('resize'));
+        }
+      });
+    }
+
+    // -----------------------------
     // Drawer toggle
     // -----------------------------
     const drawerToggle = $("#drawerToggle");
@@ -534,9 +595,7 @@
         btn.classList.add("text-primary-blue", "border-primary-blue", "border-b-2");
         btn.classList.remove("text-gray-500");
         
-        // Hide all panels
         Object.keys(panels).forEach((k) => panels[k]?.classList.add("hidden"));
-        // Show selected panel
         panels[tab]?.classList.remove("hidden");
       });
     });
@@ -558,17 +617,18 @@
       theme: { background: "#1e1e1e" },
     });
     
-    // Use FitAddon if available for better resizing
+    // FitAddon support
     let fitAddon = null;
-    if (window.FitAddon && window.FitAddon.FitAddon) {
-        fitAddon = new window.FitAddon.FitAddon();
-        term.loadAddon(fitAddon);
-    }
-    
+    try {
+        if(window.FitAddon && window.FitAddon.FitAddon) {
+            fitAddon = new window.FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+        }
+    } catch(e){}
+
     term.open(termEl);
     if(fitAddon) fitAddon.fit();
 
-    // Listen to resize events from the splitter logic
     window.addEventListener('resize', () => {
         if(fitAddon) fitAddon.fit();
     });
@@ -1006,67 +1066,91 @@
     // --- UPDATED MESSAGE HANDLER TO FIX RENDERING BUGS ---
     wsAI.addEventListener("message", (ev) => {
       let raw = ev.data;
-      if (typeof raw === "string") {
-        // Remove markdown code blocks if present (common LLM artifact)
-        raw = raw.replace(/^```json\s*/, "").replace(/\s*```$/, "").trim();
+
+      // 1. SMART JSON EXTRACTOR
+      // This function handles:
+      // - Pure JSON
+      // - JSON wrapped in text (e.g., "Here is the plan: { ... }")
+      // - JSON wrapped in Markdown code blocks (```json ... ```)
+      function extractAndParseJSON(str) {
+        if (!str || typeof str !== 'string') return null;
+        
+        // A. Try parsing the raw string first (Clean JSON)
+        try {
+          return JSON.parse(str);
+        } catch (e) {
+          // B. Regex to find the outermost JSON object: starts with '{' and ends with '}'
+          // [\s\S]* matches any character including newlines
+          const match = str.match(/\{[\s\S]*\}/);
+          if (match) {
+            try {
+              return JSON.parse(match[0]);
+            } catch (err) {
+              return null; // Brackets found, but invalid content
+            }
+          }
+        }
+        return null;
       }
 
-      const obj = safeJSONParse(raw);
+      const obj = extractAndParseJSON(raw);
 
-      // If valid JSON object, handle it
-      if (obj && typeof obj === "object") {
+      // 2. STRUCTURED DATA ROUTING (Plan vs Message)
+      if (obj && typeof obj === "object" && obj.type) {
+        
+        // --- CASE A: MARKDOWN MESSAGE ---
         if (obj.type === "message") {
-          aiMessage(String(obj.markdown || ""), "assistant");
+          // Prefer 'markdown', fallback to 'content' or 'text'
+          const text = obj.markdown || obj.content || obj.text || "";
+          aiMessage(String(text), "assistant");
           return;
         }
+
+        // --- CASE B: EXECUTION PLAN (The Wizard UI) ---
         if (obj.type === "plan") {
-          // ... (Plan handling logic same as before) ...
-          if (autopilotOn) {
+          // Autopilot Check
+          if (typeof autopilotOn !== 'undefined' && autopilotOn) {
             timeline("🤖 Autopilot enabled: auto-approving plan…", "info");
-            const stepsSummary = (obj.steps || [])
-              .map((s, i) => `${i + 1}. \`${s.cmd}\` (${s.risk})`)
-              .join("\n");
+            
+            const stepsSummary = (obj.steps || []).map((s, i) => `${i + 1}. \`${s.cmd}\` (${s.risk})`).join("\n");
+            
             aiMessage(
               `🤖 **Autopilot Plan: ${obj.title || "Proposed plan"}**\n\n${stepsSummary}\n\n_Auto-executing now…_`,
               "assistant"
             );
+            
             executePlan(obj, null, { autoApproved: true });
-          } else {
+          } 
+          // Manual Approval (Render the Card)
+          else {
             renderPlanCard(obj, {
               onReject: () => {
                 aiMessage("Plan rejected. Tell me what to change.", "assistant");
                 timeline("Plan rejected by user.", "info");
               },
-              onApprove: (plan, _card, approveBtn) => executePlan(plan, approveBtn, { autoApproved: false }),
+              onApprove: (plan, _card, approveBtn) => {
+                executePlan(plan, approveBtn, { autoApproved: false });
+              },
             });
           }
-          return;
+          return; // Stop here so we don't print raw text
         }
       } 
       
-      // FALLBACK: If parsing failed, check if it LOOKS like the JSON message structure
-      // and try to extract the markdown manually to prevent raw JSON display.
-      if (typeof raw === "string" && raw.includes('"type": "message"') && raw.includes('"markdown":')) {
-         try {
-             // Basic regex extraction as last resort
-             const match = raw.match(/"markdown":\s*"(.*)"/);
-             if (match && match[1]) {
-                 // Unescape basic json string chars
-                 const content = match[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
-                 aiMessage(content, "assistant");
-                 return;
-             }
-         } catch(e) {}
+      // 3. FALLBACK: Raw Text
+      // If regex failed to find valid JSON, it's likely just a chat message or an error.
+      // We clean up any ```json artifacts just in case.
+      if (typeof raw === "string") {
+        const cleanText = raw.replace(/^```json\s*/, "").replace(/\s*```$/, "").trim();
+        aiMessage(cleanText, "assistant");
       }
-
-      // Final fallback: treat as raw text
-      aiMessage(raw, "assistant");
     });
+
 
     setAiEnabled(false);
 
     // -----------------------------
-    // Autopilot
+    // Autopilot (telemetry -> timeline)
     // -----------------------------
     const autopilotBtn = $("#autopilotBtn");
     const autopilotPill = $("#autopilotPill");

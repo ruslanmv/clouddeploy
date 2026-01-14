@@ -114,7 +114,7 @@
     </style>
   </head>
 
-  <body class="h-screen flex flex-col bg-gray-50 overflow-hidden font-sans text-base">
+  <body data-ui-textsize="lg" class="h-screen flex flex-col bg-gray-50 overflow-hidden font-sans text-lg">
     <header class="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between">
       <div class="flex items-center space-x-3 min-w-0">
         <div class="flex items-center gap-3 min-w-0">
@@ -417,8 +417,8 @@
                  <label class="text-sm text-gray-600 font-medium block mb-1">Text Size</label>
                  <select id="uiTextSizeSelect" class="w-full border border-gray-300 rounded-md px-3 py-2 text-base bg-white">
                    <option value="text-sm">Small</option>
-                   <option value="text-base" selected>Default (Medium)</option>
-                   <option value="text-lg">Large</option>
+                   <option value="text-base">Normal</option>
+                   <option value="text-lg" selected>Large (Default)</option>
                    <option value="text-xl">Extra Large</option>
                  </select>
                </div>
@@ -699,7 +699,8 @@
 
         // --- 2. Text Size Logic ---
         const textSizeSelect = document.getElementById('uiTextSizeSelect');
-        const savedSize = localStorage.getItem('cloudDeploy_textSize');
+        // Default to Large if nothing saved
+        const savedSize = localStorage.getItem('cloudDeploy_textSize') || 'text-lg';
         
         // Apply saved size immediately
         if (savedSize) {
