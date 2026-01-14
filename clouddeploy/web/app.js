@@ -1,7 +1,6 @@
 // clouddeploy/web/app.js
-// Production-ready CloudDeploy frontend (no bundler)
+// Production-ready CloudDeploy frontend
 // Requires xterm loaded globally via <script src=".../xterm.js"></script>
-// For Markdown rendering in AI chat, include marked + DOMPurify in index.html.
 
 (() => {
   const $ = (sel) => document.querySelector(sel);
@@ -105,7 +104,7 @@
   }
 
   // ----------------------------------------------------------------------------
-  // Robust WS creator: if any websocket disconnects unexpectedly, force reload.
+  // Robust WS creator
   // ----------------------------------------------------------------------------
   function makeWS(url, name) {
     const ws = new WebSocket(url);
@@ -121,7 +120,7 @@
   }
 
   // ----------------------------------------------------------------------------
-  // Settings Modal (no React)
+  // Settings Modal (FIXED: NO PAGE RELOAD)
   // ----------------------------------------------------------------------------
   function createSettingsController() {
     const modal = $("#settingsModal");
@@ -143,21 +142,28 @@
       ollama: $("#settingsOllamaSection"),
     };
 
-    const openaiApiKey = $("#openaiApiKey");
-    const openaiModel = $("#openaiModel");
-    const openaiBaseUrl = $("#openaiBaseUrl");
-
-    const claudeApiKey = $("#claudeApiKey");
-    const claudeModel = $("#claudeModel");
-    const claudeBaseUrl = $("#claudeBaseUrl");
-
-    const watsonxApiKey = $("#watsonxApiKey");
-    const watsonxProjectId = $("#watsonxProjectId");
-    const watsonxModelId = $("#watsonxModelId");
-    const watsonxBaseUrl = $("#watsonxBaseUrl");
-
-    const ollamaBaseUrl = $("#ollamaBaseUrl");
-    const ollamaModel = $("#ollamaModel");
+    const inputs = {
+      openai: {
+        key: $("#openaiApiKey"),
+        model: $("#openaiModel"),
+        base: $("#openaiBaseUrl")
+      },
+      claude: {
+        key: $("#claudeApiKey"),
+        model: $("#claudeModel"),
+        base: $("#claudeBaseUrl")
+      },
+      watsonx: {
+        key: $("#watsonxApiKey"),
+        project: $("#watsonxProjectId"),
+        model: $("#watsonxModelId"),
+        base: $("#watsonxBaseUrl")
+      },
+      ollama: {
+        base: $("#ollamaBaseUrl"),
+        model: $("#ollamaModel")
+      }
+    };
 
     let settings = null;
     let modelsCache = {};
@@ -186,15 +192,6 @@
       sections[provider]?.classList.remove("hidden");
     }
 
-    function getActiveModelValue(provider) {
-      if (!settings) return "";
-      if (provider === "openai") return settings.openai?.model || "";
-      if (provider === "claude") return settings.claude?.model || "";
-      if (provider === "watsonx") return settings.watsonx?.model_id || "";
-      if (provider === "ollama") return settings.ollama?.model || "";
-      return "";
-    }
-
     function fillFormFromSettings() {
       if (!settings) return;
       const p = settings.provider;
@@ -211,40 +208,26 @@
       }
 
       // OpenAI
-      if (openaiApiKey) openaiApiKey.value = settings.openai?.api_key || "";
-      if (openaiModel) openaiModel.value = settings.openai?.model || "";
-      if (openaiBaseUrl) openaiBaseUrl.value = settings.openai?.base_url || "";
+      if (inputs.openai.key) inputs.openai.key.value = settings.openai?.api_key || "";
+      if (inputs.openai.model) inputs.openai.model.value = settings.openai?.model || "";
+      if (inputs.openai.base) inputs.openai.base.value = settings.openai?.base_url || "";
 
       // Claude
-      if (claudeApiKey) claudeApiKey.value = settings.claude?.api_key || "";
-      if (claudeModel) claudeModel.value = settings.claude?.model || "";
-      if (claudeBaseUrl) claudeBaseUrl.value = settings.claude?.base_url || "";
+      if (inputs.claude.key) inputs.claude.key.value = settings.claude?.api_key || "";
+      if (inputs.claude.model) inputs.claude.model.value = settings.claude?.model || "";
+      if (inputs.claude.base) inputs.claude.base.value = settings.claude?.base_url || "";
 
       // Watsonx
-      if (watsonxApiKey) watsonxApiKey.value = settings.watsonx?.api_key || "";
-      if (watsonxProjectId) watsonxProjectId.value = settings.watsonx?.project_id || "";
-      if (watsonxModelId) watsonxModelId.value = settings.watsonx?.model_id || "";
-      if (watsonxBaseUrl) watsonxBaseUrl.value = settings.watsonx?.base_url || "";
+      if (inputs.watsonx.key) inputs.watsonx.key.value = settings.watsonx?.api_key || "";
+      if (inputs.watsonx.project) inputs.watsonx.project.value = settings.watsonx?.project_id || "";
+      if (inputs.watsonx.model) inputs.watsonx.model.value = settings.watsonx?.model_id || "";
+      if (inputs.watsonx.base) inputs.watsonx.base.value = settings.watsonx?.base_url || "";
 
       // Ollama
-      if (ollamaBaseUrl) ollamaBaseUrl.value = settings.ollama?.base_url || "";
-      if (ollamaModel) ollamaModel.value = settings.ollama?.model || "";
+      if (inputs.ollama.base) inputs.ollama.base.value = settings.ollama?.base_url || "";
+      if (inputs.ollama.model) inputs.ollama.model.value = settings.ollama?.model || "";
 
       showSection(p);
-
-      // Models select reset
-      if (modelsSelect) {
-        modelsSelect.innerHTML = `<option value="">-- select a model --</option>`;
-        const cached = modelsCache[p] || [];
-        cached.forEach((m) => {
-          const opt = document.createElement("option");
-          opt.value = m;
-          opt.textContent = m;
-          modelsSelect.appendChild(opt);
-        });
-        const active = getActiveModelValue(p);
-        if (active) modelsSelect.value = active;
-      }
     }
 
     async function loadSettings() {
@@ -263,7 +246,6 @@
     async function changeProvider(provider) {
       if (!provider) return;
       showError("");
-      showSaved("");
       try {
         const res = await fetch("/api/settings/provider", {
           method: "POST",
@@ -294,8 +276,18 @@
         if (!res.ok || data.error) throw new Error(data.error || "Failed to load models");
 
         modelsCache[p] = data.models || [];
-        fillFormFromSettings();
-
+        
+        // Populate select
+        if (modelsSelect) {
+          modelsSelect.innerHTML = `<option value="">-- select a model --</option>`;
+          modelsCache[p].forEach((m) => {
+            const opt = document.createElement("option");
+            opt.value = m;
+            opt.textContent = m;
+            modelsSelect.appendChild(opt);
+          });
+        }
+        
         timeline(`Loaded ${modelsCache[p].length} models for ${p}`, "info");
       } catch (e) {
         showError(String(e?.message || e));
@@ -306,54 +298,53 @@
 
     function buildPatchFromForm() {
       if (!settings) return {};
-
       const p = settings.provider;
       const patch = { provider: p };
-
       const looksMasked = (v) => typeof v === "string" && (v.includes("***") || v === "***");
 
       if (p === "openai") {
         patch.openai = {
           ...(settings.openai || {}),
-          model: openaiModel?.value || "",
-          base_url: openaiBaseUrl?.value || "",
+          model: inputs.openai.model?.value || "",
+          base_url: inputs.openai.base?.value || "",
         };
-        const k = openaiApiKey?.value || "";
+        const k = inputs.openai.key?.value || "";
         if (k && !looksMasked(k)) patch.openai.api_key = k;
       }
 
       if (p === "claude") {
         patch.claude = {
           ...(settings.claude || {}),
-          model: claudeModel?.value || "",
-          base_url: claudeBaseUrl?.value || "",
+          model: inputs.claude.model?.value || "",
+          base_url: inputs.claude.base?.value || "",
         };
-        const k = claudeApiKey?.value || "";
+        const k = inputs.claude.key?.value || "";
         if (k && !looksMasked(k)) patch.claude.api_key = k;
       }
 
       if (p === "watsonx") {
         patch.watsonx = {
           ...(settings.watsonx || {}),
-          project_id: watsonxProjectId?.value || "",
-          model_id: watsonxModelId?.value || "",
-          base_url: watsonxBaseUrl?.value || "",
+          project_id: inputs.watsonx.project?.value || "",
+          model_id: inputs.watsonx.model?.value || "",
+          base_url: inputs.watsonx.base?.value || "",
         };
-        const k = watsonxApiKey?.value || "";
+        const k = inputs.watsonx.key?.value || "";
         if (k && !looksMasked(k)) patch.watsonx.api_key = k;
       }
 
       if (p === "ollama") {
         patch.ollama = {
           ...(settings.ollama || {}),
-          base_url: ollamaBaseUrl?.value || "",
-          model: ollamaModel?.value || "",
+          base_url: inputs.ollama.base?.value || "",
+          model: inputs.ollama.model?.value || "",
         };
       }
 
       return patch;
     }
 
+    // --- FIX: Logic to save WITHOUT reloading page ---
     async function save() {
       if (saving) return;
       saving = true;
@@ -372,12 +363,16 @@
         if (!res.ok) throw new Error(data.error || "Failed to save settings");
 
         settings = data;
-        fillFormFromSettings();
-        showSaved("Settings saved.");
-        timeline("LLM settings saved.", "success");
+        fillFormFromSettings(); // refresh UI with server values
+        showSaved("Saved ✅");
+        timeline("LLM settings saved successfully.", "success");
 
-        // safest for provider swap
-        setTimeout(() => location.reload(), 250);
+        // Close modal after brief delay (no reload!)
+        setTimeout(() => {
+            close();
+            showSaved(""); // clear message for next time
+        }, 600);
+
       } catch (e) {
         showError(String(e?.message || e));
       } finally {
@@ -396,15 +391,20 @@
     });
     providerSelect?.addEventListener("change", (e) => changeProvider(e?.target?.value));
     loadModelsBtn?.addEventListener("click", loadModels);
+    
+    // Wire up model select helper
     modelsSelect?.addEventListener("change", (e) => {
       if (!settings) return;
       const p = settings.provider;
-      const model = e?.target?.value || "";
-      if (p === "openai" && openaiModel) openaiModel.value = model;
-      if (p === "claude" && claudeModel) claudeModel.value = model;
-      if (p === "watsonx" && watsonxModelId) watsonxModelId.value = model;
-      if (p === "ollama" && ollamaModel) ollamaModel.value = model;
+      const val = e.target.value;
+      if(!val) return;
+      
+      if (p === "openai" && inputs.openai.model) inputs.openai.model.value = val;
+      if (p === "claude" && inputs.claude.model) inputs.claude.model.value = val;
+      if (p === "watsonx" && inputs.watsonx.model) inputs.watsonx.model.value = val;
+      if (p === "ollama" && inputs.ollama.model) inputs.ollama.model.value = val;
     });
+
     saveBtn?.addEventListener("click", save);
 
     return { open, close, loadSettings };
@@ -412,10 +412,6 @@
 
   // ----------------------------------------------------------------------------
   // AI "Plan → Approve → Execute" UI
-  // Server sends JSON text via ws_ai:
-  //   {type:"message", markdown:"..."} OR {type:"plan", title, steps:[{cmd,why,risk}], needs_approval:true}
-  // Execution endpoint:
-  //   POST /api/plan/execute {steps:[...]}
   // ----------------------------------------------------------------------------
   function renderPlanCard(plan, { onApprove, onReject } = {}) {
     const feed = $("#aiFeed");
@@ -525,6 +521,7 @@
       assistant: $("#tab-assistant"),
       summary: $("#tab-summary"),
       issues: $("#tab-issues"),
+      composer: $("#tab-composer"), // Added Composer panel
     };
     tabButtons.forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -535,7 +532,10 @@
         });
         btn.classList.add("text-primary-blue", "border-primary-blue", "border-b-2");
         btn.classList.remove("text-gray-500");
+        
+        // Hide all panels
         Object.keys(panels).forEach((k) => panels[k]?.classList.add("hidden"));
+        // Show selected panel
         panels[tab]?.classList.remove("hidden");
       });
     });
@@ -595,8 +595,6 @@
 
     let wsInReady = false;
     let sessionStarted = false;
-
-    // NEW: plan execution lock from state
     let execActive = false;
 
     wsTerminalOut.addEventListener("open", () => setRuntimePill("Connected", true));
@@ -613,11 +611,6 @@
         wsTerminalIn.readyState === WebSocket.OPEN &&
         !execActive
       );
-    }
-
-    function setTerminalTypingEnabled(on) {
-      // Soft UI-only guard (server also blocks typing while exec_active)
-      execActive = !on;
     }
 
     function sendToTerminal(data, { submit = false } = {}) {
@@ -852,7 +845,6 @@
       if (st.waiting_for_input) showBanner(st.prompt, st.choices);
       else hideBanner();
 
-      // update quick buttons enabled state
       disable(quick1, !canTypeTerminal());
       disable(quick2, !canTypeTerminal());
       disable(quickEnter, !canTypeTerminal());
@@ -887,7 +879,6 @@
     const aiInput = $("#aiInput");
     const aiSendBtn = $("#aiSendBtn");
 
-    // If index.html doesn't have a send button, create a tiny one next to input
     function ensureAiSendButton() {
       if ($("#aiSendBtn")) return $("#aiSendBtn");
       const wrap = aiInput?.parentElement;
@@ -946,7 +937,6 @@
       const steps = Array.isArray(plan.steps) ? plan.steps : [];
       if (steps.length === 0) return;
 
-      // Disable manual terminal typing while execution happens (server enforces too)
       execActive = true;
       if (approveBtn) {
         approveBtn.disabled = true;
@@ -998,7 +988,6 @@
     wsAI.addEventListener("close", () => setAiEnabled(false));
     wsAI.addEventListener("error", () => setAiEnabled(false));
     wsAI.addEventListener("message", (ev) => {
-      // Server now sends JSON-as-text for ws_ai. If parsing fails, treat as plain markdown.
       const obj = safeJSONParse(ev.data);
 
       if (!obj || typeof obj !== "object") {
@@ -1012,12 +1001,9 @@
       }
 
       if (obj.type === "plan") {
-        // ⭐ KEY FEATURE: Auto-execute if autopilot is ON
         if (autopilotOn) {
-          // Auto-approve and execute without rendering approval UI
           timeline("🤖 Autopilot enabled: auto-approving plan…", "info");
           
-          // Show compact plan summary in chat
           const stepsSummary = (obj.steps || [])
             .map((s, i) => `${i + 1}. \`${s.cmd}\` (${s.risk})`)
             .join("\n");
@@ -1027,10 +1013,8 @@
             "assistant"
           );
 
-          // Execute immediately
           executePlan(obj, null, { autoApproved: true });
         } else {
-          // Manual approval mode: render approval card
           renderPlanCard(obj, {
             onReject: () => {
               aiMessage("Plan rejected. Tell me what to change.", "assistant");
@@ -1042,14 +1026,13 @@
         return;
       }
 
-      // Fallback
       aiMessage(ev.data, "assistant");
     });
 
     setAiEnabled(false);
 
     // -----------------------------
-    // Autopilot (telemetry -> timeline)
+    // Autopilot
     // -----------------------------
     const autopilotBtn = $("#autopilotBtn");
     const autopilotPill = $("#autopilotPill");
@@ -1066,7 +1049,6 @@
         autopilotPill.textContent = on ? "Autopilot On" : "Autopilot Off";
       }
 
-      // Visual feedback for mode change
       if (on) {
         timeline("🤖 Autopilot ON: AI plans will auto-execute without approval.", "success");
         aiMessage(
