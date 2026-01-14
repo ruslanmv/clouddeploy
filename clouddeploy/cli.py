@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io  # Required for encoding fix
 import os
 import sys
 from pathlib import Path
@@ -51,6 +52,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # --- ENCODING FIX START ---
+    # Force UTF-8 for stdout/stderr to prevent UnicodeEncodeError (e.g. with symbols like ✕)
+    # This overrides the default system encoding if it is set to ascii/ANSI (common in Docker/Ollama envs).
+    if sys.stdout and getattr(sys.stdout, "encoding", None) and sys.stdout.encoding.lower() != 'utf-8':
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        except Exception:
+            pass
+            
+    if sys.stderr and getattr(sys.stderr, "encoding", None) and sys.stderr.encoding.lower() != 'utf-8':
+        try:
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+        except Exception:
+            pass
+    # --- ENCODING FIX END ---
+
     parser = build_parser()
     args = parser.parse_args(argv)
 

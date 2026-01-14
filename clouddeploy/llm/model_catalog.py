@@ -36,7 +36,6 @@ def _is_deprecated_or_withdrawn(lifecycle: List[Dict[str, Any]]) -> bool:
 
 # --- Provider-specific listing functions --------------------------------------
 
-
 def _list_openai_models(settings: AppSettings) -> Tuple[List[str], Optional[str]]:
     """
     Use OpenAI /v1/models endpoint to list models available to the configured key.
@@ -46,7 +45,18 @@ def _list_openai_models(settings: AppSettings) -> Tuple[List[str], Optional[str]
     if not api_key:
         return [], "OpenAI API key not configured"
 
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com")
+    # FIX: Check settings first, then env var, then default to official API
+    # This prevents empty strings from causing 'No scheme supplied' errors
+    base_url = (
+        settings.openai.base_url 
+        or os.getenv("OPENAI_BASE_URL") 
+        or "https://api.openai.com"
+    ).strip()
+    
+    # Double check to ensure we don't end up with an empty string after strip()
+    if not base_url:
+        base_url = "https://api.openai.com"
+
     url = f"{base_url.rstrip('/')}/v1/models"
 
     try:
@@ -61,7 +71,6 @@ def _list_openai_models(settings: AppSettings) -> Tuple[List[str], Optional[str]
         return models, None
     except Exception as e:
         return [], f"Error listing OpenAI models: {e}"
-
 
 def _list_claude_models(settings: AppSettings) -> Tuple[List[str], Optional[str]]:
     """

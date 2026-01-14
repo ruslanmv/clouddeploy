@@ -4,11 +4,11 @@ SHELL := /bin/bash
 
 # --- FIXES ---
 # Fixes "Failed to hardlink" warning for WSL /mnt paths
-# IMPORTANT: No trailing spaces after "copy"
 export UV_LINK_MODE=copy
 # ----------------
 
-UV ?= uv
+# Use := to ensure we use the command 'uv' and ignore inherited env vars that might be broken
+UV := uv
 PYTHON_VERSION ?= 3.11
 
 HOST ?= 127.0.0.1
@@ -22,29 +22,30 @@ VENV_SENTINEL := .venv/.installed
 help:
 	@echo "CloudDeploy targets (uv-only):"
 	@echo ""
-	@echo "  make install     Install Python $(PYTHON_VERSION), create venv, sync deps, install project (editable)"
-	@echo "  make run         Run Web UI (terminal + AI) on http://$(HOST):$(PORT)"
-	@echo "  make mcp         Run MCP server (stdio) using CMD=$(CMD)"
-	@echo "  make test        Run tests"
-	@echo "  make lint        Ruff lint"
-	@echo "  make format      Ruff format"
-	@echo "  make build       Build wheel/sdist"
-	@echo "  make clean       Remove venv + build artifacts"
+	@echo "  make install    Install Python $(PYTHON_VERSION), create venv, sync deps (Atomic)"
+	@echo "  make run        Run Web UI (terminal + AI) on http://$(HOST):$(PORT)"
+	@echo "  make mcp        Run MCP server (stdio) using CMD=$(CMD)"
+	@echo "  make test       Run tests"
+	@echo "  make lint       Ruff lint"
+	@echo "  make format     Ruff format"
+	@echo "  make build      Build wheel/sdist"
+	@echo "  make clean      Remove venv + build artifacts"
 	@echo ""
 	@echo "Variables:"
 	@echo "  PYTHON_VERSION=$(PYTHON_VERSION)"
 	@echo "  HOST=$(HOST)  PORT=$(PORT)"
 	@echo "  CMD=$(CMD)"
 
-# The real installation logic. 
-# Only runs if .venv is missing OR pyproject.toml has changed.
+# --- MAIN INSTALLATION LOGIC ---
+# 'uv sync' handles:
+# 1. Downloading Python if missing
+# 2. Creating .venv if missing
+# 3. Installing dependencies
+# 4. Installing the project in editable mode
 $(VENV_SENTINEL): pyproject.toml
-	$(UV) python install $(PYTHON_VERSION)
-	$(UV) venv --python $(PYTHON_VERSION)
-	$(UV) sync --dev
-	# Ensure the local project itself is importable inside the env (editable install)
-	$(UV) pip install -e .
-	# Create/Update the sentinel file
+	@echo "🚀 Syncing environment with uv..."
+	$(UV) sync --python $(PYTHON_VERSION)
+	# Touch sentinel to prevent re-running unnecessarily
 	touch $(VENV_SENTINEL)
 
 .PHONY: install
@@ -52,13 +53,12 @@ install: $(VENV_SENTINEL)
 
 .PHONY: run
 run: $(VENV_SENTINEL)
-	# Most reliable: run as a module so imports always work
+	@echo "🚀 Starting CloudDeploy UI..."
 	$(UV) run python -m clouddeploy ui --host $(HOST) --port $(PORT) --cmd "$(CMD)"
 
 .PHONY: mcp
 mcp: $(VENV_SENTINEL)
 	@echo "MCP server running over stdio."
-	@echo 'Example: echo "{\"id\":\"1\",\"tool\":\"cli.read\",\"args\":{}}" | $(UV) run python -m clouddeploy mcp --cmd "$(CMD)"'
 	$(UV) run python -m clouddeploy mcp --cmd "$(CMD)"
 
 .PHONY: test

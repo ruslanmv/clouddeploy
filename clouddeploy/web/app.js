@@ -1,7 +1,6 @@
 // clouddeploy/web/app.js
-// Production-ready CloudDeploy frontend (no bundler)
+// Production-ready CloudDeploy frontend
 // Requires xterm loaded globally via <script src=".../xterm.js"></script>
-// For Markdown rendering in AI chat, include marked + DOMPurify in index.html.
 
 (() => {
   const $ = (sel) => document.querySelector(sel);
@@ -54,20 +53,23 @@
       ok ? "bg-status-running" : "bg-red-500"
     } mr-2"></span>${text}`;
     pill.className = ok
-      ? "bg-status-running bg-opacity-10 text-status-running px-3 py-1 rounded-full text-sm font-medium flex items-center whitespace-nowrap"
-      : "bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm font-medium flex items-center whitespace-nowrap";
+      ? "bg-status-running bg-opacity-10 text-status-running px-3 py-1 rounded-full font-medium flex items-center whitespace-nowrap"
+      : "bg-red-100 text-red-700 px-3 py-1 rounded-full font-medium flex items-center whitespace-nowrap";
   }
 
   // -----------------------------
   // Markdown rendering (AI messages)
   // -----------------------------
   function renderMarkdownSafe(md) {
-    if (!window.marked || !window.DOMPurify) return null;
+    if (!window.marked || !window.DOMPurify) return md; 
     try {
+      // Configure marked to handle breaks nicely
+      // window.marked.setOptions({ breaks: true });
       const rawHtml = window.marked.parse(md || "");
       return window.DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true } });
-    } catch {
-      return null;
+    } catch (e) {
+      console.error("Markdown render error:", e);
+      return md;
     }
   }
 
@@ -78,12 +80,12 @@
     const box = document.createElement("div");
     box.className =
       who === "user"
-        ? "rounded-lg border border-gray-200 p-3 bg-white text-sm text-gray-800"
-        : "rounded-lg border border-gray-200 p-3 bg-gray-50 text-sm text-gray-800 prose prose-sm max-w-none";
+        ? "rounded-lg border border-gray-200 p-3 bg-white text-gray-800"
+        : "rounded-lg border border-gray-200 p-3 bg-gray-50 text-gray-800 prose prose-sm max-w-none";
 
     if (who === "assistant") {
       const html = renderMarkdownSafe(text);
-      if (html != null) box.innerHTML = html;
+      if (html) box.innerHTML = html;
       else box.textContent = text;
     } else {
       box.textContent = text;
@@ -105,7 +107,7 @@
   }
 
   // ----------------------------------------------------------------------------
-  // Robust WS creator: if any websocket disconnects unexpectedly, force reload.
+  // Robust WS creator
   // ----------------------------------------------------------------------------
   function makeWS(url, name) {
     const ws = new WebSocket(url);
@@ -121,7 +123,7 @@
   }
 
   // ----------------------------------------------------------------------------
-  // Settings Modal (no React)
+  // Settings Modal (FIXED: NO PAGE RELOAD + Text Size)
   // ----------------------------------------------------------------------------
   function createSettingsController() {
     const modal = $("#settingsModal");
@@ -131,6 +133,9 @@
     const providerSelect = $("#settingsProviderSelect");
     const loadModelsBtn = $("#settingsLoadModelsBtn");
     const modelsSelect = $("#settingsModelsSelect");
+
+    // NEW: Text Size Select
+    const textSizeSelect = $("#uiTextSizeSelect");
 
     const saveBtn = $("#settingsSaveBtn");
     const errText = $("#settingsErrorText");
@@ -143,21 +148,28 @@
       ollama: $("#settingsOllamaSection"),
     };
 
-    const openaiApiKey = $("#openaiApiKey");
-    const openaiModel = $("#openaiModel");
-    const openaiBaseUrl = $("#openaiBaseUrl");
-
-    const claudeApiKey = $("#claudeApiKey");
-    const claudeModel = $("#claudeModel");
-    const claudeBaseUrl = $("#claudeBaseUrl");
-
-    const watsonxApiKey = $("#watsonxApiKey");
-    const watsonxProjectId = $("#watsonxProjectId");
-    const watsonxModelId = $("#watsonxModelId");
-    const watsonxBaseUrl = $("#watsonxBaseUrl");
-
-    const ollamaBaseUrl = $("#ollamaBaseUrl");
-    const ollamaModel = $("#ollamaModel");
+    const inputs = {
+      openai: {
+        key: $("#openaiApiKey"),
+        model: $("#openaiModel"),
+        base: $("#openaiBaseUrl")
+      },
+      claude: {
+        key: $("#claudeApiKey"),
+        model: $("#claudeModel"),
+        base: $("#claudeBaseUrl")
+      },
+      watsonx: {
+        key: $("#watsonxApiKey"),
+        project: $("#watsonxProjectId"),
+        model: $("#watsonxModelId"),
+        base: $("#watsonxBaseUrl")
+      },
+      ollama: {
+        base: $("#ollamaBaseUrl"),
+        model: $("#ollamaModel")
+      }
+    };
 
     let settings = null;
     let modelsCache = {};
@@ -175,7 +187,12 @@
       if (!modal) return;
       modal.classList.remove("hidden");
       modal.classList.add("pointer-events-auto");
+      
+      // Load current client-side preferences
+      const savedSize = localStorage.getItem('cloudDeploy_textSize') || 'md';
+      if(textSizeSelect) textSizeSelect.value = savedSize;
     }
+    
     function close() {
       if (!modal) return;
       modal.classList.add("hidden");
@@ -184,15 +201,6 @@
     function showSection(provider) {
       Object.keys(sections).forEach((k) => sections[k]?.classList.add("hidden"));
       sections[provider]?.classList.remove("hidden");
-    }
-
-    function getActiveModelValue(provider) {
-      if (!settings) return "";
-      if (provider === "openai") return settings.openai?.model || "";
-      if (provider === "claude") return settings.claude?.model || "";
-      if (provider === "watsonx") return settings.watsonx?.model_id || "";
-      if (provider === "ollama") return settings.ollama?.model || "";
-      return "";
     }
 
     function fillFormFromSettings() {
@@ -210,41 +218,24 @@
         providerSelect.value = p;
       }
 
-      // OpenAI
-      if (openaiApiKey) openaiApiKey.value = settings.openai?.api_key || "";
-      if (openaiModel) openaiModel.value = settings.openai?.model || "";
-      if (openaiBaseUrl) openaiBaseUrl.value = settings.openai?.base_url || "";
+      // Fill existing inputs
+      if (inputs.openai.key) inputs.openai.key.value = settings.openai?.api_key || "";
+      if (inputs.openai.model) inputs.openai.model.value = settings.openai?.model || "";
+      if (inputs.openai.base) inputs.openai.base.value = settings.openai?.base_url || "";
 
-      // Claude
-      if (claudeApiKey) claudeApiKey.value = settings.claude?.api_key || "";
-      if (claudeModel) claudeModel.value = settings.claude?.model || "";
-      if (claudeBaseUrl) claudeBaseUrl.value = settings.claude?.base_url || "";
+      if (inputs.claude.key) inputs.claude.key.value = settings.claude?.api_key || "";
+      if (inputs.claude.model) inputs.claude.model.value = settings.claude?.model || "";
+      if (inputs.claude.base) inputs.claude.base.value = settings.claude?.base_url || "";
 
-      // Watsonx
-      if (watsonxApiKey) watsonxApiKey.value = settings.watsonx?.api_key || "";
-      if (watsonxProjectId) watsonxProjectId.value = settings.watsonx?.project_id || "";
-      if (watsonxModelId) watsonxModelId.value = settings.watsonx?.model_id || "";
-      if (watsonxBaseUrl) watsonxBaseUrl.value = settings.watsonx?.base_url || "";
+      if (inputs.watsonx.key) inputs.watsonx.key.value = settings.watsonx?.api_key || "";
+      if (inputs.watsonx.project) inputs.watsonx.project.value = settings.watsonx?.project_id || "";
+      if (inputs.watsonx.model) inputs.watsonx.model.value = settings.watsonx?.model_id || "";
+      if (inputs.watsonx.base) inputs.watsonx.base.value = settings.watsonx?.base_url || "";
 
-      // Ollama
-      if (ollamaBaseUrl) ollamaBaseUrl.value = settings.ollama?.base_url || "";
-      if (ollamaModel) ollamaModel.value = settings.ollama?.model || "";
+      if (inputs.ollama.base) inputs.ollama.base.value = settings.ollama?.base_url || "";
+      if (inputs.ollama.model) inputs.ollama.model.value = settings.ollama?.model || "";
 
       showSection(p);
-
-      // Models select reset
-      if (modelsSelect) {
-        modelsSelect.innerHTML = `<option value="">-- select a model --</option>`;
-        const cached = modelsCache[p] || [];
-        cached.forEach((m) => {
-          const opt = document.createElement("option");
-          opt.value = m;
-          opt.textContent = m;
-          modelsSelect.appendChild(opt);
-        });
-        const active = getActiveModelValue(p);
-        if (active) modelsSelect.value = active;
-      }
     }
 
     async function loadSettings() {
@@ -263,7 +254,6 @@
     async function changeProvider(provider) {
       if (!provider) return;
       showError("");
-      showSaved("");
       try {
         const res = await fetch("/api/settings/provider", {
           method: "POST",
@@ -294,8 +284,17 @@
         if (!res.ok || data.error) throw new Error(data.error || "Failed to load models");
 
         modelsCache[p] = data.models || [];
-        fillFormFromSettings();
-
+        
+        if (modelsSelect) {
+          modelsSelect.innerHTML = `<option value="">-- select a model --</option>`;
+          modelsCache[p].forEach((m) => {
+            const opt = document.createElement("option");
+            opt.value = m;
+            opt.textContent = m;
+            modelsSelect.appendChild(opt);
+          });
+        }
+        
         timeline(`Loaded ${modelsCache[p].length} models for ${p}`, "info");
       } catch (e) {
         showError(String(e?.message || e));
@@ -306,48 +305,46 @@
 
     function buildPatchFromForm() {
       if (!settings) return {};
-
       const p = settings.provider;
       const patch = { provider: p };
-
       const looksMasked = (v) => typeof v === "string" && (v.includes("***") || v === "***");
 
       if (p === "openai") {
         patch.openai = {
           ...(settings.openai || {}),
-          model: openaiModel?.value || "",
-          base_url: openaiBaseUrl?.value || "",
+          model: inputs.openai.model?.value || "",
+          base_url: inputs.openai.base?.value || "",
         };
-        const k = openaiApiKey?.value || "";
+        const k = inputs.openai.key?.value || "";
         if (k && !looksMasked(k)) patch.openai.api_key = k;
       }
 
       if (p === "claude") {
         patch.claude = {
           ...(settings.claude || {}),
-          model: claudeModel?.value || "",
-          base_url: claudeBaseUrl?.value || "",
+          model: inputs.claude.model?.value || "",
+          base_url: inputs.claude.base?.value || "",
         };
-        const k = claudeApiKey?.value || "";
+        const k = inputs.claude.key?.value || "";
         if (k && !looksMasked(k)) patch.claude.api_key = k;
       }
 
       if (p === "watsonx") {
         patch.watsonx = {
           ...(settings.watsonx || {}),
-          project_id: watsonxProjectId?.value || "",
-          model_id: watsonxModelId?.value || "",
-          base_url: watsonxBaseUrl?.value || "",
+          project_id: inputs.watsonx.project?.value || "",
+          model_id: inputs.watsonx.model?.value || "",
+          base_url: inputs.watsonx.base?.value || "",
         };
-        const k = watsonxApiKey?.value || "";
+        const k = inputs.watsonx.key?.value || "";
         if (k && !looksMasked(k)) patch.watsonx.api_key = k;
       }
 
       if (p === "ollama") {
         patch.ollama = {
           ...(settings.ollama || {}),
-          base_url: ollamaBaseUrl?.value || "",
-          model: ollamaModel?.value || "",
+          base_url: inputs.ollama.base?.value || "",
+          model: inputs.ollama.model?.value || "",
         };
       }
 
@@ -361,6 +358,14 @@
       showError("");
       showSaved("");
 
+      // 1. Save Text Size Client-Side
+      if (textSizeSelect) {
+        const size = textSizeSelect.value;
+        localStorage.setItem('cloudDeploy_textSize', size);
+        document.body.setAttribute('data-ui-textsize', size);
+      }
+
+      // 2. Save LLM Settings Server-Side
       try {
         const patch = buildPatchFromForm();
         const res = await fetch("/api/settings/llm", {
@@ -372,12 +377,16 @@
         if (!res.ok) throw new Error(data.error || "Failed to save settings");
 
         settings = data;
-        fillFormFromSettings();
-        showSaved("Settings saved.");
-        timeline("LLM settings saved.", "success");
+        fillFormFromSettings(); 
+        showSaved("Saved ✅");
+        timeline("Settings saved successfully.", "success");
 
-        // safest for provider swap
-        setTimeout(() => location.reload(), 250);
+        // NO RELOAD - Just close modal after a delay
+        setTimeout(() => {
+            close();
+            showSaved(""); 
+        }, 600);
+
       } catch (e) {
         showError(String(e?.message || e));
       } finally {
@@ -396,15 +405,24 @@
     });
     providerSelect?.addEventListener("change", (e) => changeProvider(e?.target?.value));
     loadModelsBtn?.addEventListener("click", loadModels);
+    
+    // Live update text size preview
+    textSizeSelect?.addEventListener("change", (e) => {
+        document.body.setAttribute('data-ui-textsize', e.target.value);
+    });
+
     modelsSelect?.addEventListener("change", (e) => {
       if (!settings) return;
       const p = settings.provider;
-      const model = e?.target?.value || "";
-      if (p === "openai" && openaiModel) openaiModel.value = model;
-      if (p === "claude" && claudeModel) claudeModel.value = model;
-      if (p === "watsonx" && watsonxModelId) watsonxModelId.value = model;
-      if (p === "ollama" && ollamaModel) ollamaModel.value = model;
+      const val = e.target.value;
+      if(!val) return;
+      
+      if (p === "openai" && inputs.openai.model) inputs.openai.model.value = val;
+      if (p === "claude" && inputs.claude.model) inputs.claude.model.value = val;
+      if (p === "watsonx" && inputs.watsonx.model) inputs.watsonx.model.value = val;
+      if (p === "ollama" && inputs.ollama.model) inputs.ollama.model.value = val;
     });
+
     saveBtn?.addEventListener("click", save);
 
     return { open, close, loadSettings };
@@ -412,10 +430,6 @@
 
   // ----------------------------------------------------------------------------
   // AI "Plan → Approve → Execute" UI
-  // Server sends JSON text via ws_ai:
-  //   {type:"message", markdown:"..."} OR {type:"plan", title, steps:[{cmd,why,risk}], needs_approval:true}
-  // Execution endpoint:
-  //   POST /api/plan/execute {steps:[...]}
   // ----------------------------------------------------------------------------
   function renderPlanCard(plan, { onApprove, onReject } = {}) {
     const feed = $("#aiFeed");
@@ -503,6 +517,50 @@
 
   document.addEventListener("DOMContentLoaded", async () => {
     // -----------------------------
+    // INIT: Text Size
+    // -----------------------------
+    const savedSize = localStorage.getItem('cloudDeploy_textSize') || 'md';
+    document.body.setAttribute('data-ui-textsize', savedSize);
+
+    // -----------------------------
+    // INIT: Column Resizer
+    // -----------------------------
+    const dragHandle = document.getElementById('dragHandle');
+    const container = document.getElementById('mainSplitter'); 
+    const leftPanel = document.getElementById('leftPanel');
+    const rightPanel = document.getElementById('rightPanel');
+    let isDragging = false;
+
+    if (dragHandle && container && leftPanel && rightPanel) {
+      dragHandle.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        document.body.classList.add('resizing');
+        dragHandle.classList.add('dragging');
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const containerRect = container.getBoundingClientRect();
+        let newLeftWidth = ((e.clientX - containerRect.left) / containerRect.width) * 100;
+        if (newLeftWidth < 20) newLeftWidth = 20;
+        if (newLeftWidth > 80) newLeftWidth = 80;
+        leftPanel.style.width = `${newLeftWidth}%`;
+        rightPanel.style.width = `${100 - newLeftWidth}%`;
+        // Trigger resize event for xterm fit addon
+        window.dispatchEvent(new Event('resize'));
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (isDragging) {
+          isDragging = false;
+          document.body.classList.remove('resizing');
+          dragHandle.classList.remove('dragging');
+          window.dispatchEvent(new Event('resize'));
+        }
+      });
+    }
+
+    // -----------------------------
     // Drawer toggle
     // -----------------------------
     const drawerToggle = $("#drawerToggle");
@@ -525,6 +583,7 @@
       assistant: $("#tab-assistant"),
       summary: $("#tab-summary"),
       issues: $("#tab-issues"),
+      composer: $("#tab-composer"),
     };
     tabButtons.forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -535,6 +594,7 @@
         });
         btn.classList.add("text-primary-blue", "border-primary-blue", "border-b-2");
         btn.classList.remove("text-gray-500");
+        
         Object.keys(panels).forEach((k) => panels[k]?.classList.add("hidden"));
         panels[tab]?.classList.remove("hidden");
       });
@@ -556,7 +616,22 @@
       scrollback: 5000,
       theme: { background: "#1e1e1e" },
     });
+    
+    // FitAddon support
+    let fitAddon = null;
+    try {
+        if(window.FitAddon && window.FitAddon.FitAddon) {
+            fitAddon = new window.FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+        }
+    } catch(e){}
+
     term.open(termEl);
+    if(fitAddon) fitAddon.fit();
+
+    window.addEventListener('resize', () => {
+        if(fitAddon) fitAddon.fit();
+    });
 
     term.focus();
     termEl.addEventListener("mousedown", () => term.focus());
@@ -595,8 +670,6 @@
 
     let wsInReady = false;
     let sessionStarted = false;
-
-    // NEW: plan execution lock from state
     let execActive = false;
 
     wsTerminalOut.addEventListener("open", () => setRuntimePill("Connected", true));
@@ -613,11 +686,6 @@
         wsTerminalIn.readyState === WebSocket.OPEN &&
         !execActive
       );
-    }
-
-    function setTerminalTypingEnabled(on) {
-      // Soft UI-only guard (server also blocks typing while exec_active)
-      execActive = !on;
     }
 
     function sendToTerminal(data, { submit = false } = {}) {
@@ -852,7 +920,6 @@
       if (st.waiting_for_input) showBanner(st.prompt, st.choices);
       else hideBanner();
 
-      // update quick buttons enabled state
       disable(quick1, !canTypeTerminal());
       disable(quick2, !canTypeTerminal());
       disable(quickEnter, !canTypeTerminal());
@@ -887,7 +954,6 @@
     const aiInput = $("#aiInput");
     const aiSendBtn = $("#aiSendBtn");
 
-    // If index.html doesn't have a send button, create a tiny one next to input
     function ensureAiSendButton() {
       if ($("#aiSendBtn")) return $("#aiSendBtn");
       const wrap = aiInput?.parentElement;
@@ -946,7 +1012,6 @@
       const steps = Array.isArray(plan.steps) ? plan.steps : [];
       if (steps.length === 0) return;
 
-      // Disable manual terminal typing while execution happens (server enforces too)
       execActive = true;
       if (approveBtn) {
         approveBtn.disabled = true;
@@ -997,54 +1062,92 @@
     });
     wsAI.addEventListener("close", () => setAiEnabled(false));
     wsAI.addEventListener("error", () => setAiEnabled(false));
+    
+    // --- UPDATED MESSAGE HANDLER TO FIX RENDERING BUGS ---
     wsAI.addEventListener("message", (ev) => {
-      // Server now sends JSON-as-text for ws_ai. If parsing fails, treat as plain markdown.
-      const obj = safeJSONParse(ev.data);
+      const raw = ev.data;
 
-      if (!obj || typeof obj !== "object") {
-        aiMessage(ev.data, "assistant");
-        return;
-      }
+      // Parse only if:
+      // 1) The whole payload is JSON (starts with { or [)
+      // 2) OR it's inside a fenced ```json ... ``` block
+      function tryParseStructuredPayload(str) {
+        if (typeof str !== "string") return null;
+        const s = str.trim();
+        if (!s) return null;
 
-      if (obj.type === "message") {
-        aiMessage(String(obj.markdown || ""), "assistant");
-        return;
-      }
-
-      if (obj.type === "plan") {
-        // ⭐ KEY FEATURE: Auto-execute if autopilot is ON
-        if (autopilotOn) {
-          // Auto-approve and execute without rendering approval UI
-          timeline("🤖 Autopilot enabled: auto-approving plan…", "info");
-          
-          // Show compact plan summary in chat
-          const stepsSummary = (obj.steps || [])
-            .map((s, i) => `${i + 1}. \`${s.cmd}\` (${s.risk})`)
-            .join("\n");
-          
-          aiMessage(
-            `🤖 **Autopilot Plan: ${obj.title || "Proposed plan"}**\n\n${stepsSummary}\n\n_Auto-executing now…_`,
-            "assistant"
-          );
-
-          // Execute immediately
-          executePlan(obj, null, { autoApproved: true });
-        } else {
-          // Manual approval mode: render approval card
-          renderPlanCard(obj, {
-            onReject: () => {
-              aiMessage("Plan rejected. Tell me what to change.", "assistant");
-              timeline("Plan rejected by user.", "info");
-            },
-            onApprove: (plan, _card, approveBtn) => executePlan(plan, approveBtn, { autoApproved: false }),
-          });
+        // A) fenced json block: ```json { ... } ```
+        const fenced = s.match(/```json\s*([\s\S]*?)\s*```/i);
+        if (fenced && fenced[1]) {
+          try {
+            return JSON.parse(fenced[1].trim());
+          } catch {
+            return null;
+          }
         }
+
+        // B) full payload JSON only (do NOT regex-extract from text)
+        const first = s[0];
+        if (first === "{" || first === "[") {
+          try {
+            return JSON.parse(s);
+          } catch {
+            return null;
+          }
+        }
+
+        return null;
+      }
+
+      const obj = tryParseStructuredPayload(raw);
+
+      // ---- Structured routing ----
+      if (obj && typeof obj === "object") {
+        // MESSAGE
+        if (obj.type === "message") {
+          const text = obj.markdown || obj.content || obj.text || "";
+          aiMessage(String(text), "assistant");
+          return;
+        }
+
+        // PLAN
+        if (obj.type === "plan") {
+          if (autopilotOn) {
+            timeline("🤖 Autopilot enabled: auto-approving plan…", "info");
+            const stepsSummary = (obj.steps || [])
+              .map((s, i) => `${i + 1}. \`${s.cmd}\` (${s.risk})`)
+              .join("\n");
+
+            aiMessage(
+              `🤖 **Autopilot Plan: ${obj.title || "Proposed plan"}**\n\n${stepsSummary}\n\n_Auto-executing now…_`,
+              "assistant"
+            );
+
+            executePlan(obj, null, { autoApproved: true });
+          } else {
+            renderPlanCard(obj, {
+              onReject: () => {
+                aiMessage("Plan rejected. Tell me what to change.", "assistant");
+                timeline("Plan rejected by user.", "info");
+              },
+              onApprove: (plan, _card, approveBtn) => {
+                executePlan(plan, approveBtn, { autoApproved: false });
+              },
+            });
+          }
+          return;
+        }
+
+        // Unknown structured type -> show nicely
+        aiMessage("```json\n" + JSON.stringify(obj, null, 2) + "\n```", "assistant");
         return;
       }
 
-      // Fallback
-      aiMessage(ev.data, "assistant");
+      // ---- Fallback: raw text ----
+      if (typeof raw === "string") {
+        aiMessage(raw, "assistant");
+      }
     });
+
 
     setAiEnabled(false);
 
@@ -1066,7 +1169,6 @@
         autopilotPill.textContent = on ? "Autopilot On" : "Autopilot Off";
       }
 
-      // Visual feedback for mode change
       if (on) {
         timeline("🤖 Autopilot ON: AI plans will auto-execute without approval.", "success");
         aiMessage(

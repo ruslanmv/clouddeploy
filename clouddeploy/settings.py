@@ -38,7 +38,7 @@ def _settings_path() -> Path:
     return _app_data_dir() / "settings.json"
 
 
-def _env_default_settings() -> Dict[str, Any]:
+def _env_default_settings_old() -> Dict[str, Any]:
     """
     Seed defaults from env vars when present.
     Backward compatible with env-based config.
@@ -75,6 +75,46 @@ def _env_default_settings() -> Dict[str, Any]:
         "version": 1,
     }
 
+def _env_default_settings() -> Dict[str, Any]:
+    """
+    Seed defaults from env vars when present.
+    """
+    provider = (os.getenv("GITPILOT_PROVIDER") or os.getenv("CLOUDDEPLOY_PROVIDER") or "watsonx").strip().lower()
+    if provider not in DEFAULT_PROVIDERS:
+        provider = "watsonx"
+
+    return {
+        "provider": provider,
+        "providers": DEFAULT_PROVIDERS,
+        "openai": {
+            "api_key": os.getenv("OPENAI_API_KEY", ""),
+            "model": os.getenv("GITPILOT_OPENAI_MODEL", "gpt-4o-mini"),
+            "base_url": os.getenv("OPENAI_BASE_URL", ""),
+        },
+        "claude": {
+            "api_key": os.getenv("ANTHROPIC_API_KEY", ""),
+            "model": os.getenv("GITPILOT_CLAUDE_MODEL", "claude-sonnet-4-5"),
+            "base_url": os.getenv("ANTHROPIC_BASE_URL", ""),
+        },
+        "watsonx": {
+            "api_key": os.getenv("WATSONX_API_KEY", ""),
+            "project_id": os.getenv("WATSONX_PROJECT_ID", ""),
+            "model_id": os.getenv("GITPILOT_WATSONX_MODEL", "ibm/granite-3-8b-instruct"),
+            "base_url": os.getenv("WATSONX_BASE_URL", "https://us-south.ml.cloud.ibm.com"),
+        },
+        "ollama": {
+            "base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            "model": os.getenv("GITPILOT_OLLAMA_MODEL", "llama3"),
+            # --- CRITICAL PERFORMANCE SETTINGS FOR LOCAL MODELS ---
+            # 8192 context allows it to remember the "Wizard" state + history
+            "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "8192")),
+            # 1024 output tokens ensures JSON plans don't get cut off
+            "num_predict": int(os.getenv("OLLAMA_NUM_PREDICT", "1024")),
+            # 0.1 temp makes output strict/deterministic (better for JSON)
+            "temperature": float(os.getenv("OLLAMA_TEMPERATURE", "0.1")),
+        },
+        "version": 1,
+    }
 
 def _deep_merge(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(base)
