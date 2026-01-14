@@ -865,6 +865,11 @@ If the user is ONLY asking a question or wants explanation (no action needed), r
 }
 
 IMPORTANT: Always output valid JSON. Never include markdown fences (```json) or preamble text.
+CRITICAL OUTPUT RULES:
+1. Act as a JSON API, NOT a chatbot. 
+2. Output RAW JSON ONLY. Do not speak.
+3. Do NOT say "Here is the plan". Do NOT say "Let me know if this works".
+4. Start your response strictly with "{" and end with "}".
 """
 
     try:
