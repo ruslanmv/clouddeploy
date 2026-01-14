@@ -1,6 +1,6 @@
-# clouddeploy/server.py
 from __future__ import annotations
-
+from clouddeploy.composer.api import router as composer_router
+# clouddeploy/server.py
 import asyncio
 import json
 import os
@@ -31,6 +31,7 @@ WEB_DIR = APP_ROOT / "web"
 SCRIPTS_DIR = (APP_ROOT.parent / "scripts").resolve()
 
 app = FastAPI(title="CloudDeploy")
+app.include_router(composer_router)
 app.mount("/assets", StaticFiles(directory=str(WEB_DIR), html=False), name="assets")
 
 autopilot_task: Optional[asyncio.Task] = None
@@ -1216,3 +1217,9 @@ async def autopilot_loop() -> None:
             pass
         autopilot_enabled = False
         return
+# --- Terraform Composer static bundle (additive) ---
+from starlette.staticfiles import StaticFiles
+import os as _os
+_composer_dir = _os.path.join(_os.path.dirname(__file__), "web", "composer")
+if _os.path.isdir(_composer_dir):
+    app.mount("/composer", StaticFiles(directory=_composer_dir, html=True), name="composer")

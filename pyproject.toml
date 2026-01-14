@@ -4,34 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clouddeploy"
-version = "0.1.1"
-description = "CloudDeploy: enterprise terminal + AI workspace and MCP server for guided cloud deployments (IBM Cloud first)."
+version = "0.1.2"
+description = "CloudDeploy: enterprise terminal + AI workspace and MCP server."
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+# Loosened slightly to ensure 3.11 is definitely accepted
+requires-python = ">=3.11,<3.13" 
 license = { file = "LICENSE" }
 authors = [{ name = "Ruslan Magana Vsevolodovna" }]
-keywords = [
-  "ibm-cloud",
-  "code-engine",
-  "container-registry",
-  "mcp",
-  "terminal",
-  "devops",
-  "automation",
-  "watsonx",
-  "ai",
-  "crewai"
-]
 classifiers = [
   "Development Status :: 3 - Alpha",
-  "Intended Audience :: Developers",
-  "Intended Audience :: Information Technology",
-  "License :: OSI Approved :: Apache Software License",
-  "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
-  "Topic :: Software Development :: Build Tools",
-  "Topic :: System :: Systems Administration",
-  "Topic :: Utilities",
 ]
 
 dependencies = [
@@ -48,6 +30,10 @@ dependencies = [
   "rich>=13.0.0",
   "pyjwt[crypto]>=2.8.0",
   "litellm>=1.80.5",
+  "python-hcl2>=7.3.1",
+  "jsonschema>=4.18.0",
+  "networkx>=3.0.0",
+  "python-multipart>=0.0.7",  
 ]
 
 [project.optional-dependencies]
@@ -68,20 +54,6 @@ include = ["clouddeploy*"]
 [tool.setuptools.package-data]
 clouddeploy = ["web/*", "web/**/*", "py.typed"]
 
-[tool.setuptools]
-include-package-data = true
-
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
-ignore = ["E501"]
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]

@@ -1,4 +1,3 @@
-<!-- clouddeploy/web/index.html -->
 <!DOCTYPE html>
 <html lang="en">
   <head>
@@ -12,22 +11,18 @@
       content="CloudDeploy Enterprise Workspace — Terminal + AI Copilot for interactive cloud deployments."
     />
 
-    <!-- Tailwind + Icons -->
     <script src="https://cdn.tailwindcss.com"></script>
     <link
       rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css"
     />
 
-    <!-- xterm (CSS + JS GLOBAL) -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
     <script src="https://cdn.jsdelivr.net/npm/xterm/lib/xterm.js"></script>
 
-    <!-- Markdown render + sanitize (AI panel) -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 
-    <!-- App CSS -->
     <link rel="stylesheet" href="/assets/styles.css" />
 
     <script>
@@ -89,9 +84,7 @@
     </style>
   </head>
 
-  <!-- ↑ Increased baseline readability: text-base -->
   <body class="h-screen flex flex-col bg-gray-50 overflow-hidden font-sans text-base">
-    <!-- Header -->
     <header class="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between">
       <div class="flex items-center space-x-3 min-w-0">
         <div class="flex items-center gap-3 min-w-0">
@@ -99,18 +92,15 @@
             <i class="fas fa-cloud"></i>
           </div>
           <div class="min-w-0">
-            <!-- ↑ title larger -->
             <h1 class="text-xl font-semibold text-gray-900 leading-tight whitespace-nowrap">
               CloudDeploy
             </h1>
-            <!-- ↑ subtitle larger (was text-xs) -->
             <div class="text-sm text-gray-500 truncate">
               Terminal + AI Workspace for Cloud Deployments
             </div>
           </div>
         </div>
 
-        <!-- ↑ pill larger (was text-xs) -->
         <span class="hidden md:inline-flex bg-gray-100 text-gray-700 px-3 py-1 rounded-full text-sm font-medium">
           IBM Cloud (v1)
         </span>
@@ -132,7 +122,6 @@
       </div>
 
       <div class="flex items-center space-x-2">
-        <!-- Settings -->
         <button
           id="settingsBtn"
           class="bg-gray-100 text-gray-700 hover:bg-gray-200 px-3 py-2 rounded-md text-base font-medium flex items-center"
@@ -175,26 +164,20 @@
       </div>
     </header>
 
-    <!-- Main -->
     <main class="flex-1 flex overflow-hidden">
-      <!-- Terminal Panel -->
       <section class="w-1/2 bg-terminal-bg text-terminal-text font-mono p-4 flex flex-col">
         <div id="promptBanner" class="mb-4 p-4 bg-gray-800 rounded-xl hidden border border-gray-700">
           <div class="flex items-start justify-between gap-3">
             <div>
-              <!-- ↑ (was text-xs) -->
               <p class="text-sm text-gray-300">Action required</p>
-              <!-- ↑ (was text-sm) -->
               <p id="promptBannerText" class="text-base text-gray-100 mt-1">Waiting for input…</p>
             </div>
-            <!-- ↑ (was text-xs) -->
             <span class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-200 whitespace-nowrap">
               Interactive prompt
             </span>
           </div>
 
           <div class="flex flex-wrap gap-2 mt-3">
-            <!-- ↑ (was text-sm) -->
             <button id="quickAction1" class="bg-primary-blue hover:opacity-90 text-white px-4 py-2 rounded-md text-base">
               1
             </button>
@@ -211,7 +194,6 @@
           <div id="xterm"></div>
         </div>
 
-        <!-- ↑ (was text-xs) -->
         <div class="mt-3 text-sm text-gray-300 flex items-center justify-between gap-3">
           <span class="truncate">
             Tip: Use <span class="text-gray-100">Autopilot</span> only for wizard prompts. It stops on errors.
@@ -223,10 +205,8 @@
         </div>
       </section>
 
-      <!-- AI Panel -->
       <section class="w-1/2 bg-white border-l border-gray-200 flex flex-col">
         <div class="border-b border-gray-200 flex">
-          <!-- ↑ tabs larger (was text-sm) -->
           <button
             data-tab="assistant"
             class="tabBtn px-4 py-3 text-base font-semibold text-primary-blue border-b-2 border-primary-blue"
@@ -240,6 +220,13 @@
             type="button"
           >
             Summary
+          </button>
+          <button 
+            data-tab="composer" 
+            class="tabBtn px-4 py-3 text-base font-medium text-gray-600"
+            type="button"
+          >
+            Composer
           </button>
           <button
             data-tab="issues"
@@ -255,14 +242,11 @@
             <div id="statusCard" class="bg-secondary-blue rounded-2xl p-5 mb-6 border border-blue-100">
               <div class="flex items-start justify-between gap-4">
                 <div>
-                  <!-- ↑ (was default) -->
                   <h3 class="text-lg font-semibold text-gray-900">Workspace Status</h3>
-                  <!-- ↑ (was text-sm) -->
                   <p id="statusCardText" class="text-base text-gray-700 mt-1">
                     Connecting…
                   </p>
                 </div>
-                <!-- ↑ (was text-xs) -->
                 <div class="text-sm text-blue-700 bg-white/70 px-3 py-1 rounded-lg border border-blue-100 whitespace-nowrap">
                   Live
                 </div>
@@ -271,6 +255,14 @@
 
             <div id="aiFeed" class="space-y-4"></div>
           </div>
+          
+          <div id="tab-composer" class="hidden flex-1 overflow-hidden" style="height:100%;">
+            <iframe src="/composer/index.html" style="width:100%;height:100%;border:none"></iframe>
+          </div>
+
+          <div id="tab-summary" class="hidden flex-1 overflow-auto p-6"></div>
+
+          <div id="tab-issues" class="hidden flex-1 overflow-auto p-6"></div>
 
           <div class="border-t border-gray-200 p-4 flex items-center gap-2">
             <input
@@ -293,9 +285,7 @@
       </section>
     </main>
 
-    <!-- Timeline Drawer -->
     <footer class="bg-white border-t border-gray-200">
-      <!-- ↑ (was text-sm) -->
       <button
         id="drawerToggle"
         class="w-full px-4 py-3 text-base text-gray-700 flex justify-between items-center hover:bg-gray-50"
@@ -308,12 +298,10 @@
         <i id="drawerIcon" class="fas fa-chevron-up"></i>
       </button>
       <div id="drawerContent" class="h-44 overflow-auto p-4 bg-gray-50 hidden">
-        <!-- ↑ (was text-xs) -->
         <div id="timeline" class="text-sm font-mono space-y-2"></div>
       </div>
     </footer>
 
-    <!-- Script Picker Modal -->
     <div id="scriptModal" class="fixed inset-0 bg-black/40 hidden z-50">
       <div class="h-full flex items-center justify-center p-4 modal-open">
         <div class="bg-white rounded-2xl shadow-soft max-w-2xl w-full modal-card">
@@ -359,7 +347,6 @@
       </div>
     </div>
 
-    <!-- Settings Modal (LLM Provider) -->
     <div id="settingsModal" class="fixed inset-0 bg-black/40 hidden z-50">
       <div class="h-full flex items-center justify-center p-4 modal-open">
         <div class="bg-white rounded-2xl shadow-soft max-w-2xl w-full modal-card">
@@ -382,7 +369,6 @@
           </div>
 
           <div class="p-6 space-y-6">
-            <!-- Provider -->
             <div class="bg-gray-50 border border-gray-200 rounded-2xl p-5">
               <div class="flex items-center justify-between gap-3">
                 <div>
@@ -415,7 +401,6 @@
               </div>
             </div>
 
-            <!-- OpenAI -->
             <div id="settingsOpenaiSection" class="hidden">
               <div class="text-base font-semibold text-gray-900 mb-2">OpenAI</div>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -451,7 +436,6 @@
               </div>
             </div>
 
-            <!-- Claude -->
             <div id="settingsClaudeSection" class="hidden">
               <div class="text-base font-semibold text-gray-900 mb-2">Claude (Anthropic)</div>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -487,7 +471,6 @@
               </div>
             </div>
 
-            <!-- Watsonx -->
             <div id="settingsWatsonxSection" class="hidden">
               <div class="text-base font-semibold text-gray-900 mb-2">IBM watsonx.ai</div>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -531,7 +514,6 @@
               </div>
             </div>
 
-            <!-- Ollama -->
             <div id="settingsOllamaSection" class="hidden">
               <div class="text-base font-semibold text-gray-900 mb-2">Ollama (Local)</div>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -582,8 +564,6 @@
       </div>
     </div>
 
-    <!-- Footer -->
-    <!-- ↑ footer larger (was text-xs) -->
     <div class="bg-white border-t border-gray-200 px-6 py-3 flex items-center justify-between text-sm text-gray-500">
       <div class="flex items-center gap-3">
         <a
