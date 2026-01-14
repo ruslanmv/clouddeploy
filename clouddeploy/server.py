@@ -302,21 +302,21 @@ def _validate_rm_command(cmd: str) -> Tuple[bool, str]:
     - rm -rf temp_folder
     - rm file.txt
     Block dangerous patterns like:
-    - rm -rf / 
+    - rm -rf /
     - rm -rf /*
     - rm -rf ~
     """
     c = cmd.strip()
-    
+
     # Block extremely dangerous patterns
     if re.search(r"rm\s+.*(/\s|/\*|\~|\.\.)", c):
         return False, "rm with /, /*, ~, or .. is not allowed"
-    
+
     # Check if it matches any safe pattern
     for pattern in _SAFE_RM_PATTERNS:
         if re.match(pattern, c):
             return True, ""
-    
+
     return False, "rm command doesn't match safe patterns (use: rm file.txt or rm -rf folder_name)"
 
 
@@ -330,11 +330,11 @@ def _validate_cmd(cmd: str) -> Tuple[bool, str]:
         return False, "Empty command"
     if len(c) > 500:
         return False, "Command too long"
-    
+
     # Block shell metacharacters (pipes, redirects, command chaining)
     if _META_CHARS.search(c):
         return False, "Shell metacharacters (|, ;, &, >, <, $, \\) are not allowed"
-    
+
     # Block destructive commands
     if _BLOCKLIST.search(c):
         return False, "Command contains a blocked/destructive keyword"
@@ -364,7 +364,7 @@ async def _exec_plan_steps(steps: List[Dict[str, Any]]) -> Tuple[bool, str]:
     """
     Executes approved plan steps sequentially.
     IMPORTANT: Bypasses policy checks because commands are already validated by _validate_cmd.
-    
+
     This is what actually TYPES the commands into the left terminal (PTY).
     """
     global _exec_active
@@ -390,13 +390,13 @@ async def _exec_plan_steps(steps: List[Dict[str, Any]]) -> Tuple[bool, str]:
                 runner = _get_runner()
                 if runner is None:
                     return False, f"Step {i}: PTY session not available"
-                
+
                 try:
                     # Write command + newline directly to PTY
                     runner.write(f"{cmd}\n")
                 except Exception as e:
                     return False, f"Step {i}: Failed to write to PTY: {e}"
-                
+
                 # Wait for command to execute and output to appear
                 await asyncio.sleep(0.30)
 
@@ -411,7 +411,7 @@ async def api_plan_execute(payload: Dict[str, Any]) -> JSONResponse:
     Execute an APPROVED plan.
     Payload:
       { "steps": [ {"cmd":"ls -la","why":"...","risk":"low"}, ... ] }
-    
+
     This endpoint is called by the frontend when user clicks "Approve & Run".
     """
     steps = payload.get("steps") or []
@@ -760,11 +760,106 @@ def _try_parse_json(s: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Rendering fix (server-side): robust JSON extraction + normalization
+# ---------------------------------------------------------------------------
+
+def _extract_first_json_object(s: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract and parse the first JSON object found inside a string.
+    Handles:
+      - pure JSON
+      - JSON inside ```json ... ```
+      - text before/after JSON
+
+    This prevents UI rendering raw "text + JSON" as markdown.
+    """
+    if not s:
+        return None
+
+    txt = str(s).strip()
+
+    # A) fenced ```json ... ```
+    m = re.search(r"```json\s*([\s\S]*?)\s*```", txt, flags=re.IGNORECASE)
+    if m:
+        try:
+            obj = json.loads(m.group(1).strip())
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            pass
+
+    # B) pure JSON
+    if txt.startswith("{") and txt.endswith("}"):
+        try:
+            obj = json.loads(txt)
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            pass
+
+    # C) scan for first JSON object using brace counting (string-safe)
+    start = txt.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_str = False
+    esc = False
+
+    for i in range(start, len(txt)):
+        ch = txt[i]
+
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+
+        if ch == '"':
+            in_str = True
+            continue
+
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = txt[start : i + 1]
+                try:
+                    obj = json.loads(candidate)
+                    return obj if isinstance(obj, dict) else None
+                except Exception:
+                    return None
+
+    return None
+
+
+def _normalize_llm_payload(raw_s: str) -> Dict[str, Any]:
+    """
+    Ensure ws_ai always emits one clean structured message:
+      - {type:"plan", ...}
+      - {type:"message", markdown:"..."}
+
+    If the LLM returns JSON embedded in text, extract it.
+    Otherwise wrap raw output as markdown.
+    """
+    obj = _extract_first_json_object(raw_s)
+    if obj and isinstance(obj, dict) and obj.get("type") in {"plan", "message"}:
+        if obj.get("type") == "message":
+            md = obj.get("markdown") or obj.get("content") or obj.get("text") or ""
+            return {"type": "message", "markdown": str(md)}
+        return obj
+
+    return {"type": "message", "markdown": str(raw_s or "").strip()}
+
+
 @app.websocket("/ws/ai")
 async def ws_ai(ws: WebSocket) -> None:
     """
     AI Chat websocket with Plan → Approve → Execute protocol.
-    
+
     When user asks to DO something, AI returns a structured plan.
     Frontend shows approval UI, then calls /api/plan/execute.
     That's when commands actually type into the LEFT terminal (PTY).
@@ -866,10 +961,11 @@ If the user is ONLY asking a question or wants explanation (no action needed), r
 
 IMPORTANT: Always output valid JSON. Never include markdown fences (```json) or preamble text.
 CRITICAL OUTPUT RULES:
-1. Act as a JSON API, NOT a chatbot. 
+1. Act as a JSON API, NOT a chatbot.
 2. Output RAW JSON ONLY. Do not speak.
 3. Do NOT say "Here is the plan". Do NOT say "Let me know if this works".
 4. Start your response strictly with "{" and end with "}".
+5. Never output multiple JSON objects or any extra text before/after JSON.
 """
 
     try:
@@ -1000,9 +1096,9 @@ CRITICAL OUTPUT RULES:
                 raw = llm.invoke(full_prompt)  # type: ignore[attr-defined]
 
             raw_s = str(raw).strip()
-            
-            # Try to parse as JSON
-            obj = _try_parse_json(raw_s)
+
+            # --- FIX: Normalize model output so UI never renders raw "text + JSON" ---
+            obj = _normalize_llm_payload(raw_s)
 
             # If the model complied with protocol and returned a plan
             if obj and obj.get("type") == "plan":
@@ -1042,8 +1138,8 @@ CRITICAL OUTPUT RULES:
                     await _json_ws_send(ws, obj)
                     continue
 
-            # Otherwise: treat as normal markdown message
-            await _json_ws_send(ws, {"type": "message", "markdown": raw_s})
+            # Otherwise: treat as normal markdown message (already normalized)
+            await _json_ws_send(ws, {"type": "message", "markdown": str(obj.get("markdown") or "")})
 
     except WebSocketDisconnect:
         return
@@ -1222,6 +1318,8 @@ async def autopilot_loop() -> None:
             pass
         autopilot_enabled = False
         return
+
+
 # --- Terraform Composer static bundle (additive) ---
 from starlette.staticfiles import StaticFiles
 import os as _os
