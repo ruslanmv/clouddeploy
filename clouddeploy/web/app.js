@@ -61,12 +61,15 @@
   // Markdown rendering (AI messages)
   // -----------------------------
   function renderMarkdownSafe(md) {
-    if (!window.marked || !window.DOMPurify) return null;
+    if (!window.marked || !window.DOMPurify) return md; // Fallback to text if missing
     try {
+      // Configure marked for better breaks if needed
+      // window.marked.setOptions({ breaks: true }); 
       const rawHtml = window.marked.parse(md || "");
       return window.DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true } });
-    } catch {
-      return null;
+    } catch (e) {
+      console.error("Markdown render error:", e);
+      return md;
     }
   }
 
@@ -82,7 +85,7 @@
 
     if (who === "assistant") {
       const html = renderMarkdownSafe(text);
-      if (html != null) box.innerHTML = html;
+      if (html) box.innerHTML = html;
       else box.textContent = text;
     } else {
       box.textContent = text;
@@ -344,7 +347,6 @@
       return patch;
     }
 
-    // --- FIX: Logic to save WITHOUT reloading page ---
     async function save() {
       if (saving) return;
       saving = true;
@@ -370,7 +372,7 @@
         // Close modal after brief delay (no reload!)
         setTimeout(() => {
             close();
-            showSaved(""); // clear message for next time
+            showSaved(""); 
         }, 600);
 
       } catch (e) {
@@ -392,7 +394,6 @@
     providerSelect?.addEventListener("change", (e) => changeProvider(e?.target?.value));
     loadModelsBtn?.addEventListener("click", loadModels);
     
-    // Wire up model select helper
     modelsSelect?.addEventListener("change", (e) => {
       if (!settings) return;
       const p = settings.provider;
@@ -521,7 +522,7 @@
       assistant: $("#tab-assistant"),
       summary: $("#tab-summary"),
       issues: $("#tab-issues"),
-      composer: $("#tab-composer"), // Added Composer panel
+      composer: $("#tab-composer"),
     };
     tabButtons.forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -556,7 +557,21 @@
       scrollback: 5000,
       theme: { background: "#1e1e1e" },
     });
+    
+    // Use FitAddon if available for better resizing
+    let fitAddon = null;
+    if (window.FitAddon && window.FitAddon.FitAddon) {
+        fitAddon = new window.FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+    }
+    
     term.open(termEl);
+    if(fitAddon) fitAddon.fit();
+
+    // Listen to resize events from the splitter logic
+    window.addEventListener('resize', () => {
+        if(fitAddon) fitAddon.fit();
+    });
 
     term.focus();
     termEl.addEventListener("mousedown", () => term.focus());
@@ -987,46 +1002,65 @@
     });
     wsAI.addEventListener("close", () => setAiEnabled(false));
     wsAI.addEventListener("error", () => setAiEnabled(false));
+    
+    // --- UPDATED MESSAGE HANDLER TO FIX RENDERING BUGS ---
     wsAI.addEventListener("message", (ev) => {
-      const obj = safeJSONParse(ev.data);
-
-      if (!obj || typeof obj !== "object") {
-        aiMessage(ev.data, "assistant");
-        return;
+      let raw = ev.data;
+      if (typeof raw === "string") {
+        // Remove markdown code blocks if present (common LLM artifact)
+        raw = raw.replace(/^```json\s*/, "").replace(/\s*```$/, "").trim();
       }
 
-      if (obj.type === "message") {
-        aiMessage(String(obj.markdown || ""), "assistant");
-        return;
-      }
+      const obj = safeJSONParse(raw);
 
-      if (obj.type === "plan") {
-        if (autopilotOn) {
-          timeline("🤖 Autopilot enabled: auto-approving plan…", "info");
-          
-          const stepsSummary = (obj.steps || [])
-            .map((s, i) => `${i + 1}. \`${s.cmd}\` (${s.risk})`)
-            .join("\n");
-          
-          aiMessage(
-            `🤖 **Autopilot Plan: ${obj.title || "Proposed plan"}**\n\n${stepsSummary}\n\n_Auto-executing now…_`,
-            "assistant"
-          );
-
-          executePlan(obj, null, { autoApproved: true });
-        } else {
-          renderPlanCard(obj, {
-            onReject: () => {
-              aiMessage("Plan rejected. Tell me what to change.", "assistant");
-              timeline("Plan rejected by user.", "info");
-            },
-            onApprove: (plan, _card, approveBtn) => executePlan(plan, approveBtn, { autoApproved: false }),
-          });
+      // If valid JSON object, handle it
+      if (obj && typeof obj === "object") {
+        if (obj.type === "message") {
+          aiMessage(String(obj.markdown || ""), "assistant");
+          return;
         }
-        return;
+        if (obj.type === "plan") {
+          // ... (Plan handling logic same as before) ...
+          if (autopilotOn) {
+            timeline("🤖 Autopilot enabled: auto-approving plan…", "info");
+            const stepsSummary = (obj.steps || [])
+              .map((s, i) => `${i + 1}. \`${s.cmd}\` (${s.risk})`)
+              .join("\n");
+            aiMessage(
+              `🤖 **Autopilot Plan: ${obj.title || "Proposed plan"}**\n\n${stepsSummary}\n\n_Auto-executing now…_`,
+              "assistant"
+            );
+            executePlan(obj, null, { autoApproved: true });
+          } else {
+            renderPlanCard(obj, {
+              onReject: () => {
+                aiMessage("Plan rejected. Tell me what to change.", "assistant");
+                timeline("Plan rejected by user.", "info");
+              },
+              onApprove: (plan, _card, approveBtn) => executePlan(plan, approveBtn, { autoApproved: false }),
+            });
+          }
+          return;
+        }
+      } 
+      
+      // FALLBACK: If parsing failed, check if it LOOKS like the JSON message structure
+      // and try to extract the markdown manually to prevent raw JSON display.
+      if (typeof raw === "string" && raw.includes('"type": "message"') && raw.includes('"markdown":')) {
+         try {
+             // Basic regex extraction as last resort
+             const match = raw.match(/"markdown":\s*"(.*)"/);
+             if (match && match[1]) {
+                 // Unescape basic json string chars
+                 const content = match[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+                 aiMessage(content, "assistant");
+                 return;
+             }
+         } catch(e) {}
       }
 
-      aiMessage(ev.data, "assistant");
+      // Final fallback: treat as raw text
+      aiMessage(raw, "assistant");
     });
 
     setAiEnabled(false);
