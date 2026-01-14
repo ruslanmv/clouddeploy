@@ -1065,64 +1065,65 @@
     
     // --- UPDATED MESSAGE HANDLER TO FIX RENDERING BUGS ---
     wsAI.addEventListener("message", (ev) => {
-      let raw = ev.data;
+      const raw = ev.data;
 
-      // 1. SMART JSON EXTRACTOR
-      // This function handles:
-      // - Pure JSON
-      // - JSON wrapped in text (e.g., "Here is the plan: { ... }")
-      // - JSON wrapped in Markdown code blocks (```json ... ```)
-      function extractAndParseJSON(str) {
-        if (!str || typeof str !== 'string') return null;
-        
-        // A. Try parsing the raw string first (Clean JSON)
-        try {
-          return JSON.parse(str);
-        } catch (e) {
-          // B. Regex to find the outermost JSON object: starts with '{' and ends with '}'
-          // [\s\S]* matches any character including newlines
-          const match = str.match(/\{[\s\S]*\}/);
-          if (match) {
-            try {
-              return JSON.parse(match[0]);
-            } catch (err) {
-              return null; // Brackets found, but invalid content
-            }
+      // Parse only if:
+      // 1) The whole payload is JSON (starts with { or [)
+      // 2) OR it's inside a fenced ```json ... ``` block
+      function tryParseStructuredPayload(str) {
+        if (typeof str !== "string") return null;
+        const s = str.trim();
+        if (!s) return null;
+
+        // A) fenced json block: ```json { ... } ```
+        const fenced = s.match(/```json\s*([\s\S]*?)\s*```/i);
+        if (fenced && fenced[1]) {
+          try {
+            return JSON.parse(fenced[1].trim());
+          } catch {
+            return null;
           }
         }
+
+        // B) full payload JSON only (do NOT regex-extract from text)
+        const first = s[0];
+        if (first === "{" || first === "[") {
+          try {
+            return JSON.parse(s);
+          } catch {
+            return null;
+          }
+        }
+
         return null;
       }
 
-      const obj = extractAndParseJSON(raw);
+      const obj = tryParseStructuredPayload(raw);
 
-      // 2. STRUCTURED DATA ROUTING (Plan vs Message)
-      if (obj && typeof obj === "object" && obj.type) {
-        
-        // --- CASE A: MARKDOWN MESSAGE ---
+      // ---- Structured routing ----
+      if (obj && typeof obj === "object") {
+        // MESSAGE
         if (obj.type === "message") {
-          // Prefer 'markdown', fallback to 'content' or 'text'
           const text = obj.markdown || obj.content || obj.text || "";
           aiMessage(String(text), "assistant");
           return;
         }
 
-        // --- CASE B: EXECUTION PLAN (The Wizard UI) ---
+        // PLAN
         if (obj.type === "plan") {
-          // Autopilot Check
-          if (typeof autopilotOn !== 'undefined' && autopilotOn) {
+          if (autopilotOn) {
             timeline("🤖 Autopilot enabled: auto-approving plan…", "info");
-            
-            const stepsSummary = (obj.steps || []).map((s, i) => `${i + 1}. \`${s.cmd}\` (${s.risk})`).join("\n");
-            
+            const stepsSummary = (obj.steps || [])
+              .map((s, i) => `${i + 1}. \`${s.cmd}\` (${s.risk})`)
+              .join("\n");
+
             aiMessage(
               `🤖 **Autopilot Plan: ${obj.title || "Proposed plan"}**\n\n${stepsSummary}\n\n_Auto-executing now…_`,
               "assistant"
             );
-            
+
             executePlan(obj, null, { autoApproved: true });
-          } 
-          // Manual Approval (Render the Card)
-          else {
+          } else {
             renderPlanCard(obj, {
               onReject: () => {
                 aiMessage("Plan rejected. Tell me what to change.", "assistant");
@@ -1133,16 +1134,17 @@
               },
             });
           }
-          return; // Stop here so we don't print raw text
+          return;
         }
-      } 
-      
-      // 3. FALLBACK: Raw Text
-      // If regex failed to find valid JSON, it's likely just a chat message or an error.
-      // We clean up any ```json artifacts just in case.
+
+        // Unknown structured type -> show nicely
+        aiMessage("```json\n" + JSON.stringify(obj, null, 2) + "\n```", "assistant");
+        return;
+      }
+
+      // ---- Fallback: raw text ----
       if (typeof raw === "string") {
-        const cleanText = raw.replace(/^```json\s*/, "").replace(/\s*```$/, "").trim();
-        aiMessage(cleanText, "assistant");
+        aiMessage(raw, "assistant");
       }
     });
 
