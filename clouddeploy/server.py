@@ -1,5 +1,6 @@
 from __future__ import annotations
 from clouddeploy.composer.api import router as composer_router
+from clouddeploy.api.diagrams import router as diagrams_router
 # clouddeploy/server.py
 import asyncio
 import json
@@ -32,6 +33,7 @@ SCRIPTS_DIR = (APP_ROOT.parent / "scripts").resolve()
 
 app = FastAPI(title="CloudDeploy")
 app.include_router(composer_router)
+app.include_router(diagrams_router)
 app.mount("/assets", StaticFiles(directory=str(WEB_DIR), html=False), name="assets")
 
 autopilot_task: Optional[asyncio.Task] = None
@@ -841,12 +843,13 @@ def _normalize_llm_payload(raw_s: str) -> Dict[str, Any]:
     Ensure ws_ai always emits one clean structured message:
       - {type:"plan", ...}
       - {type:"message", markdown:"..."}
+      - {type:"diagram", ...}
 
     If the LLM returns JSON embedded in text, extract it.
     Otherwise wrap raw output as markdown.
     """
     obj = _extract_first_json_object(raw_s)
-    if obj and isinstance(obj, dict) and obj.get("type") in {"plan", "message"}:
+    if obj and isinstance(obj, dict) and obj.get("type") in {"plan", "message", "diagram"}:
         if obj.get("type") == "message":
             md = obj.get("markdown") or obj.get("content") or obj.get("text") or ""
             return {"type": "message", "markdown": str(md)}
@@ -958,6 +961,22 @@ If the user is ONLY asking a question or wants explanation (no action needed), r
   "type": "message",
   "markdown": "<your answer in markdown format>"
 }
+
+If the user asks you to generate or draw a cloud architecture diagram, return:
+{
+  "type": "diagram",
+  "diagram_format": "mermaid",
+  "title": "<descriptive title>",
+  "code": "<mermaid architecture-beta diagram code>",
+  "summary_markdown": "<brief explanation>",
+  "composer_graph": null
+}
+
+CRITICAL DIAGRAM RULES:
+1. ONLY return diagram type when explicitly asked to generate/draw/create a diagram
+2. The "code" field MUST contain valid Mermaid architecture-beta syntax
+3. Do NOT include markdown fences (```) in the code field
+4. Start the Mermaid code with "architecture-beta" on the first line
 
 IMPORTANT: Always output valid JSON. Never include markdown fences (```json) or preamble text.
 CRITICAL OUTPUT RULES:

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo } from "react";
 import ReactFlow, {
   Background,
   Controls,
@@ -9,6 +9,7 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { layoutLR } from "./layout.js";
+import { setupImportFromChat } from "./integration/importFromChat.js";
 
 const initialNodes = [
   { id: "vpc", position: { x: 0, y: 0 }, data: { label: "terraform-aws-vpc" } },
@@ -20,6 +21,11 @@ const initialEdges = [{ id: "e1", source: "vpc", target: "eks" }];
 export default function App() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+
+  useEffect(() => {
+    // Allow Chat UI to import a generated graph into this Composer UI.
+    return setupImportFromChat({ setNodes, setEdges });
+  }, [setNodes, setEdges]);
 
   const onConnect = useCallback(
     (params) => setEdges((eds) => addEdge(params, eds)),
