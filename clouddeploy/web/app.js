@@ -1109,6 +1109,35 @@
           return;
         }
 
+        // DIAGRAM
+        if (obj.type === "diagram") {
+          if (window.CloudDeployDiagramCard?.renderDiagramCard) {
+            window.CloudDeployDiagramCard.renderDiagramCard(obj, {
+              onEdit: ({ instruction, prior_code }) => {
+                aiMessage(instruction, "user");
+                const combined =
+                  "Update the following Mermaid architecture-beta cloud diagram. " +
+                  "Return ONLY valid JSON with type=\"diagram\" and the full updated code.\n\n" +
+                  "CURRENT_DIAGRAM_CODE:\n" +
+                  (prior_code || "") +
+                  "\n\nEDIT_REQUEST:\n" +
+                  instruction;
+                aiWs.send(combined);
+              },
+              onOpenComposer: ({ diagram, code }) => {
+                if (window.CloudDeployComposerBridge?.openInComposer) {
+                  window.CloudDeployComposerBridge.openInComposer({ diagram, code });
+                } else {
+                  aiMessage("Composer bridge is not installed in this UI.", "assistant");
+                }
+              },
+            });
+          } else {
+            aiMessage("```json\n" + JSON.stringify(obj, null, 2) + "\n```", "assistant");
+          }
+          return;
+        }
+
         // PLAN
         if (obj.type === "plan") {
           if (autopilotOn) {
