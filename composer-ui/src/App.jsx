@@ -14,6 +14,7 @@ import { setupAIDiagramSync } from "./integration/aiDiagramSync.js";
 import AwsServiceNode from "./nodes/AwsServiceNode.jsx";
 import TextNoteNode from "./nodes/TextNoteNode.jsx";
 import DiagramManagerPanel from "./components/DiagramManagerPanel.jsx";
+import CloudDraft from "./cloudDraft/CloudDraft.jsx";
 
 const initialNodes = [
   { id: "vpc", position: { x: 0, y: 0 }, data: { label: "terraform-aws-vpc" } },
@@ -22,7 +23,7 @@ const initialNodes = [
 
 const initialEdges = [{ id: "e1", source: "vpc", target: "eks" }];
 
-export default function App() {
+function ReactFlowComposer() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const [graphMeta, setGraphMeta] = useState({ stage: "diagram" });
@@ -158,6 +159,67 @@ export default function App() {
         <Controls />
         <MiniMap />
       </ReactFlow>
+    </div>
+  );
+}
+
+export default function App() {
+  // "Composer" iframe now supports two modes:
+  // - reactflow: the existing AI + ReactFlow composer
+  // - clouddraft: the grid-based drag/drop editor
+  const [mode, setMode] = useState("clouddraft"); // clouddraft | reactflow (default: clouddraft)
+
+  return (
+    <div style={{ width: "100vw", height: "100vh" }}>
+      {/* Simple mode switcher */}
+      <div
+        style={{
+          position: "absolute",
+          top: 10,
+          right: 10,
+          zIndex: 50,
+          display: "flex",
+          gap: 8,
+          background: "rgba(255,255,255,0.95)",
+          border: "1px solid #e5e7eb",
+          borderRadius: 999,
+          padding: 6,
+          boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+        }}
+      >
+        <button
+          onClick={() => setMode("reactflow")}
+          style={{
+            padding: "6px 10px",
+            borderRadius: 999,
+            border: "1px solid #e5e7eb",
+            background: mode === "reactflow" ? "#111827" : "white",
+            color: mode === "reactflow" ? "white" : "#111827",
+            cursor: "pointer",
+            fontSize: 12,
+            fontWeight: 600,
+          }}
+        >
+          Composer
+        </button>
+        <button
+          onClick={() => setMode("clouddraft")}
+          style={{
+            padding: "6px 10px",
+            borderRadius: 999,
+            border: "1px solid #e5e7eb",
+            background: mode === "clouddraft" ? "#111827" : "white",
+            color: mode === "clouddraft" ? "white" : "#111827",
+            cursor: "pointer",
+            fontSize: 12,
+            fontWeight: 600,
+          }}
+        >
+          CloudDraft
+        </button>
+      </div>
+
+      {mode === "clouddraft" ? <CloudDraft /> : <ReactFlowComposer />}
     </div>
   );
 }
