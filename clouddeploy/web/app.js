@@ -668,6 +668,10 @@
     const wsAI = makeWS(`${wsBase}/ws/ai`, "AI");
     const wsAutopilot = makeWS(`${wsBase}/ws/autopilot`, "Autopilot");
 
+    // Expose AI websocket globally for Composer integration
+    window.CloudDeploySendAI = (text) => wsAI.send(text);
+    window.CloudDeployAIWS = wsAI;
+
     let wsInReady = false;
     let sessionStarted = false;
     let execActive = false;
@@ -1106,6 +1110,35 @@
         if (obj.type === "message") {
           const text = obj.markdown || obj.content || obj.text || "";
           aiMessage(String(text), "assistant");
+          return;
+        }
+
+        // DIAGRAM
+        if (obj.type === "diagram") {
+          if (window.CloudDeployDiagramCard?.renderDiagramCard) {
+            window.CloudDeployDiagramCard.renderDiagramCard(obj, {
+              onEdit: ({ instruction, prior_code }) => {
+                aiMessage(instruction, "user");
+                const combined =
+                  "Update the following Mermaid architecture-beta cloud diagram. " +
+                  "Return ONLY valid JSON with type=\"diagram\" and the full updated code.\n\n" +
+                  "CURRENT_DIAGRAM_CODE:\n" +
+                  (prior_code || "") +
+                  "\n\nEDIT_REQUEST:\n" +
+                  instruction;
+                aiWs.send(combined);
+              },
+              onOpenComposer: ({ diagram, code }) => {
+                if (window.CloudDeployComposerBridge?.openInComposer) {
+                  window.CloudDeployComposerBridge.openInComposer({ diagram, code });
+                } else {
+                  aiMessage("Composer bridge is not installed in this UI.", "assistant");
+                }
+              },
+            });
+          } else {
+            aiMessage("```json\n" + JSON.stringify(obj, null, 2) + "\n```", "assistant");
+          }
           return;
         }
 

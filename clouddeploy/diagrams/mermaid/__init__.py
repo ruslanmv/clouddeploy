@@ -1,0 +1,1 @@
+"""Mermaid helpers (validation/sanitization)."""
