@@ -36,7 +36,13 @@ app = FastAPI(title="CloudDeploy")
 app.include_router(composer_router)
 app.include_router(diagrams_router)
 app.include_router(composer_ai_router)
+#
+# Static UI assets
+# - /assets/*   -> main UI assets (terminal UI, css, and the built composer bundle under /assets/composer)
+# - /composer/* -> dedicated mount for the Composer SPA so the iframe can load /composer/index.html
+#
 app.mount("/assets", StaticFiles(directory=str(WEB_DIR), html=False), name="assets")
+app.mount("/composer", StaticFiles(directory=str(WEB_DIR / "composer"), html=True), name="composer")
 
 autopilot_task: Optional[asyncio.Task] = None
 autopilot_enabled: bool = False
@@ -1339,11 +1345,3 @@ async def autopilot_loop() -> None:
             pass
         autopilot_enabled = False
         return
-
-
-# --- Terraform Composer static bundle (additive) ---
-from starlette.staticfiles import StaticFiles
-import os as _os
-_composer_dir = _os.path.join(_os.path.dirname(__file__), "web", "composer")
-if _os.path.isdir(_composer_dir):
-    app.mount("/composer", StaticFiles(directory=_composer_dir, html=True), name="composer")
