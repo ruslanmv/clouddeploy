@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo } from "react";
 import ReactFlow, {
   Background,
   Controls,
@@ -9,6 +9,9 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { layoutLR } from "./layout.js";
+import { setupImportFromChat } from "./integration/importFromChat.js";
+import DiagramPromptBar from "./components/DiagramPromptBar.jsx";
+import AwsServiceNode from "./nodes/AwsServiceNode.jsx";
 
 const initialNodes = [
   { id: "vpc", position: { x: 0, y: 0 }, data: { label: "terraform-aws-vpc" } },
@@ -21,6 +24,11 @@ export default function App() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
+  useEffect(() => {
+    // Allow Chat UI to import a generated graph into this Composer UI.
+    return setupImportFromChat({ setNodes, setEdges });
+  }, [setNodes, setEdges]);
+
   const onConnect = useCallback(
     (params) => setEdges((eds) => addEdge(params, eds)),
     [setEdges]
@@ -32,7 +40,8 @@ export default function App() {
 
   const topBar = useMemo(() => (
     <div style={{ position: "absolute", top: 10, left: 10, zIndex: 10 }}>
-      <button onClick={onAutoLayout} style={{ padding: "6px 10px" }}>
+      <DiagramPromptBar />
+      <button onClick={onAutoLayout} style={{ padding: "6px 10px", marginTop: 8 }}>
         Auto Layout (Dagre)
       </button>
     </div>
@@ -47,6 +56,7 @@ export default function App() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        nodeTypes={{ awsService: AwsServiceNode }}
         fitView
       >
         <Background />
