@@ -86,6 +86,12 @@ export default function CloudDraft() {
     { id: '5', x: 500, y: 220, label: 'RDS Database', type: 'aws.rds', width: 160, height: 80 },
   ]);
 
+  // CloudDraft now supports edges (connections between node ports)
+  const [edges, setEdges] = useState([
+    // Example initial edge:
+    // { id: 'e1', source: '3', target: '4', sourceSide: 'right', targetSide: 'left', label: null }
+  ]);
+
   const [draggedNode, setDraggedNode] = useState(null);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [selectedNodeId, setSelectedNodeId] = useState(null);
@@ -97,6 +103,49 @@ export default function CloudDraft() {
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
   const aiSyncRef = useRef(null);
+
+  // Linking interaction state
+  // linking: { sourceId, sourceSide, startX, startY, currentX, currentY }
+  const [linking, setLinking] = useState(null);
+  // Hovered target port during linking: { nodeId, side }
+  const [hoverPort, setHoverPort] = useState(null);
+
+  const PORT_SIDES = ['left', 'right', 'top', 'bottom'];
+
+  const getNodeById = useCallback((id) => nodes.find(n => String(n.id) === String(id)), [nodes]);
+
+  const portXY = useCallback((node, side) => {
+    if (!node) return { x: 0, y: 0 };
+    const x = Number(node.x || 0);
+    const y = Number(node.y || 0);
+    const w = Number(node.width || 0);
+    const h = Number(node.height || 0);
+    switch (side) {
+      case 'left': return { x, y: y + h / 2 };
+      case 'right': return { x: x + w, y: y + h / 2 };
+      case 'top': return { x: x + w / 2, y };
+      case 'bottom': return { x: x + w / 2, y: y + h };
+      default: return { x: x + w, y: y + h / 2 };
+    }
+  }, []);
+
+  const edgePath = useCallback((p1, p2) => {
+    // Smooth cubic curve
+    const dx = Math.max(60, Math.abs(p2.x - p1.x) * 0.5);
+    const c1 = { x: p1.x + dx, y: p1.y };
+    const c2 = { x: p2.x - dx, y: p2.y };
+    return `M ${p1.x} ${p1.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${p2.x} ${p2.y}`;
+  }, []);
+
+  const edgeKey = (e) => `${String(e.source)}:${String(e.sourceSide)}->${String(e.target)}:${String(e.targetSide)}`;
+
+  const addEdgeIfMissing = useCallback((next) => {
+    setEdges((prev) => {
+      const exists = prev.some((p) => edgeKey(p) === edgeKey(next));
+      if (exists) return prev;
+      return [...prev, next];
+    });
+  }, []);
 
   // Convert CloudDraft nodes to composer_graph format
   const toComposerGraph = useCallback(() => {
@@ -112,10 +161,24 @@ export default function CloudDraft() {
           height: n.height
         }
       })),
-      edges: [],
-      metadata: { ...graphMeta, format: 'clouddraft' }
+      edges: edges.map(e => ({
+        source: String(e.source),
+        target: String(e.target),
+        label: e.label ? String(e.label) : null,
+      })),
+      // Store port-side info in metadata so we can reconstruct visuals across modes
+      metadata: {
+        ...graphMeta,
+        format: 'clouddraft',
+        edgePorts: edges.map(e => ({
+          source: String(e.source),
+          target: String(e.target),
+          sourceSide: e.sourceSide || 'right',
+          targetSide: e.targetSide || 'left',
+        }))
+      }
     };
-  }, [nodes, graphMeta]);
+  }, [nodes, edges, graphMeta]);
 
   // Convert composer_graph format to CloudDraft nodes
   const fromComposerGraph = useCallback((graph) => {
@@ -138,6 +201,22 @@ export default function CloudDraft() {
     });
 
     setNodes(newNodes);
+
+    // Rebuild edges (connections). If metadata.edgePorts exists, keep side info.
+    const metaPorts = Array.isArray(graph?.metadata?.edgePorts) ? graph.metadata.edgePorts : [];
+    const rebuiltEdges = (graph.edges || []).map((e, idx) => {
+      const found = metaPorts.find(p => String(p.source) === String(e.source) && String(p.target) === String(e.target));
+      return {
+        id: `e${idx}_${String(e.source)}_${String(e.target)}`,
+        source: String(e.source),
+        target: String(e.target),
+        sourceSide: found?.sourceSide || 'right',
+        targetSide: found?.targetSide || 'left',
+        label: e.label || null,
+      };
+    });
+    setEdges(rebuiltEdges);
+
     if (graph.metadata) {
       setGraphMeta(graph.metadata);
     }
@@ -159,7 +238,17 @@ export default function CloudDraft() {
           }
         }));
       },
-      getEdges: () => [],
+      getEdges: () => {
+        // Convert CloudDraft edges to ReactFlow-like edges (carry handle ids)
+        return edges.map((e) => ({
+          id: e.id || `e_${String(e.source)}_${String(e.target)}`,
+          source: String(e.source),
+          target: String(e.target),
+          sourceHandle: e.sourceSide ? e.sourceSide[0] : undefined, // l/r/t/b
+          targetHandle: e.targetSide ? e.targetSide[0] : undefined,
+          label: e.label || undefined,
+        }));
+      },
       setNodes: (rfNodes) => {
         // Convert ReactFlow nodes back to CloudDraft format
         const cloudDraftNodes = rfNodes.map(n => {
@@ -179,7 +268,25 @@ export default function CloudDraft() {
         });
         setNodes(cloudDraftNodes);
       },
-      setEdges: () => {}, // CloudDraft doesn't use edges yet
+      setEdges: (rfEdges) => {
+        // Convert ReactFlow edges back to CloudDraft edges. Prefer metadata.edgePorts if present.
+        const metaPorts = Array.isArray(graphMeta?.edgePorts) ? graphMeta.edgePorts : [];
+        const cdEdges = (rfEdges || []).map((e, idx) => {
+          const found = metaPorts.find(p => String(p.source) === String(e.source) && String(p.target) === String(e.target));
+          const sh = e.sourceHandle || found?.sourceSide?.[0] || 'r';
+          const th = e.targetHandle || found?.targetSide?.[0] || 'l';
+          const mapSide = (h) => (h === 'l' ? 'left' : h === 'r' ? 'right' : h === 't' ? 'top' : 'bottom');
+          return {
+            id: e.id || `e${idx}_${String(e.source)}_${String(e.target)}`,
+            source: String(e.source),
+            target: String(e.target),
+            sourceSide: found?.sourceSide || mapSide(sh),
+            targetSide: found?.targetSide || mapSide(th),
+            label: e.label || null,
+          };
+        });
+        setEdges(cdEdges);
+      },
       getGraphMeta: () => graphMeta,
       setGraphMeta: setGraphMeta,
     });
@@ -190,7 +297,7 @@ export default function CloudDraft() {
   // Notify parent when graph changes (manual edits)
   useEffect(() => {
     aiSyncRef.current?.notifyGraphChanged?.();
-  }, [nodes]);
+  }, [nodes, edges]);
 
   // AI Handlers
   const handleAIGenerate = (e) => {
@@ -279,15 +386,43 @@ export default function CloudDraft() {
         node.id === draggedNode ? { ...node, x: snappedX, y: snappedY } : node
       ));
     }
+
+    if (linking) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setLinking((prev) => prev ? ({
+        ...prev,
+        currentX: e.clientX - rect.left,
+        currentY: e.clientY - rect.top,
+      }) : prev);
+    }
   };
 
   const handleMouseUp = () => {
     setDraggedNode(null);
+
+    // Finish linking if we were connecting ports
+    if (linking) {
+      const target = hoverPort;
+      if (target && String(target.nodeId) !== String(linking.sourceId)) {
+        addEdgeIfMissing({
+          id: `e_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+          source: String(linking.sourceId),
+          target: String(target.nodeId),
+          sourceSide: linking.sourceSide || 'right',
+          targetSide: target.side || 'left',
+          label: null,
+        });
+      }
+      setLinking(null);
+      setHoverPort(null);
+    }
   };
 
   const deleteSelected = () => {
     if (selectedNodeId) {
       setNodes(nodes.filter(n => n.id !== selectedNodeId));
+      setEdges(edges.filter(e => String(e.source) !== String(selectedNodeId) && String(e.target) !== String(selectedNodeId)));
       setSelectedNodeId(null);
     }
   };
@@ -327,6 +462,7 @@ export default function CloudDraft() {
         } else if (Array.isArray(json)) {
           // Legacy format
           setNodes(json);
+          setEdges([]);
         } else {
           console.error("Invalid JSON format");
         }
@@ -587,6 +723,51 @@ export default function CloudDraft() {
           backgroundSize: '20px 20px'
         }}
       >
+        {/* Edges layer (SVG under nodes, above background). */}
+        <svg
+          style={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            pointerEvents: 'none',
+            zIndex: 0,
+          }}
+        >
+          {edges.map((e) => {
+            const sNode = getNodeById(e.source);
+            const tNode = getNodeById(e.target);
+            if (!sNode || !tNode) return null;
+            const p1 = portXY(sNode, e.sourceSide || 'right');
+            const p2 = portXY(tNode, e.targetSide || 'left');
+            return (
+              <path
+                key={e.id || edgeKey(e)}
+                d={edgePath(p1, p2)}
+                fill="none"
+                stroke="rgba(59,130,246,0.85)"
+                strokeWidth="2"
+              />
+            );
+          })}
+          {/* Live preview while linking */}
+          {linking ? (() => {
+            const sNode = getNodeById(linking.sourceId);
+            if (!sNode) return null;
+            const p1 = portXY(sNode, linking.sourceSide || 'right');
+            const p2 = { x: linking.currentX || p1.x, y: linking.currentY || p1.y };
+            return (
+              <path
+                d={edgePath(p1, p2)}
+                fill="none"
+                stroke="rgba(59,130,246,0.45)"
+                strokeWidth="2"
+                strokeDasharray="6 6"
+              />
+            );
+          })() : null}
+        </svg>
+
         {nodes.map((node) => {
           const typeInfo = NODE_TYPES.find(t => t.id === node.type);
           const Icon = typeInfo.icon;
@@ -609,7 +790,7 @@ export default function CloudDraft() {
                 width: node.width,
                 height: node.height,
                 cursor: draggedNode === node.id ? 'grabbing' : 'grab',
-                zIndex: isSelected ? 10 : 1,
+                zIndex: isSelected ? 10 : 2,
               }}
               className={`
                 group rounded-xl border-2 transition-shadow duration-200
@@ -618,6 +799,51 @@ export default function CloudDraft() {
                 ${isSelected ? 'ring-2 ring-blue-400 ring-offset-2 shadow-lg scale-[1.02]' : 'shadow-sm hover:shadow-md'}
               `}
             >
+              {/* Ports (handles) */}
+              {PORT_SIDES.map((side) => (
+                <div
+                  key={side}
+                  onMouseDown={(e) => {
+                    // Start linking from this port.
+                    e.stopPropagation();
+                    e.preventDefault();
+                    const rect = canvasRef.current?.getBoundingClientRect();
+                    const p = portXY(node, side);
+                    setLinking({
+                      sourceId: node.id,
+                      sourceSide: side,
+                      startX: p.x,
+                      startY: p.y,
+                      currentX: rect ? (e.clientX - rect.left) : p.x,
+                      currentY: rect ? (e.clientY - rect.top) : p.y,
+                    });
+                  }}
+                  onMouseEnter={() => setHoverPort({ nodeId: node.id, side })}
+                  onMouseLeave={() => setHoverPort((prev) => (prev && prev.nodeId === node.id && prev.side === side ? null : prev))}
+                  style={{
+                    position: 'absolute',
+                    width: 12,
+                    height: 12,
+                    borderRadius: 999,
+                    background: 'white',
+                    border: '2px solid rgba(59,130,246,0.9)',
+                    boxShadow: '0 2px 6px rgba(0,0,0,0.12)',
+                    cursor: 'crosshair',
+                    top: side === 'top' ? -6 : side === 'bottom' ? undefined : '50%',
+                    bottom: side === 'bottom' ? -6 : undefined,
+                    left: side === 'left' ? -6 : side === 'right' ? undefined : '50%',
+                    right: side === 'right' ? -6 : undefined,
+                    transform:
+                      side === 'left' || side === 'right'
+                        ? 'translateY(-50%)'
+                        : 'translateX(-50%)',
+                    opacity: isSelected ? 1 : 0.25,
+                    transition: 'opacity 120ms ease',
+                    zIndex: 20,
+                  }}
+                />
+              ))}
+
               <div className="flex items-start justify-between mb-2">
                 <div className={`p-2 rounded-lg bg-white shadow-sm border border-slate-100 ${typeInfo.textColor}`}>
                   <Icon size={20} />

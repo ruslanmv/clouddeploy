@@ -51,11 +51,25 @@ export default function TextNoteNode({ data, id }) {
       <Handle
         type="target"
         position={Position.Left}
+        id="l"
         style={{ background: "#f59e0b", width: 8, height: 8 }}
       />
       <Handle
         type="source"
         position={Position.Right}
+        id="r"
+        style={{ background: "#f59e0b", width: 8, height: 8 }}
+      />
+      <Handle
+        type="target"
+        position={Position.Top}
+        id="t"
+        style={{ background: "#f59e0b", width: 8, height: 8 }}
+      />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        id="b"
         style={{ background: "#f59e0b", width: 8, height: 8 }}
       />
 

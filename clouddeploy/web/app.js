@@ -106,6 +106,306 @@
     }
   }
 
+  // -----------------------------
+  // Composer (iframe) AI bridge
+  // -----------------------------
+  // The Composer UI (ReactFlow) lives in /composer and communicates with this parent
+  // page via postMessage. This bridge:
+  //  - calls /api/composer-ai for diagram/plan/build actions
+  //  - enforces Diagram -> Plan -> Build approvals
+  //  - pushes updated graphs back into the Composer iframe
+  function createComposerBridge() {
+    const iframe = () => document.getElementById("composerFrame");
+
+    const state = {
+      graph: null,
+      approvedDiagram: false,
+      plan: null,
+      approvedPlan: false,
+      buildFormat: "terraform",
+    };
+
+    function postToComposer(message) {
+      const fr = iframe();
+      if (!fr || !fr.contentWindow) return;
+      // Same-origin in production; keep targetOrigin strict.
+      fr.contentWindow.postMessage(message, window.location.origin);
+    }
+
+    async function callComposerAI(payload) {
+      const res = await fetch("/api/composer-ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      // Try to surface server error messages clearly.
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        const maybe = safeJSONParse(text);
+        const msg = maybe?.detail || maybe?.message || text || `HTTP ${res.status}`;
+        throw new Error(String(msg));
+      }
+      return await res.json();
+    }
+
+    function setStage(stage) {
+      postToComposer({ type: "clouddeploy:set_stage", stage });
+    }
+
+    function applyGraph(graph) {
+      if (!graph) return;
+      state.graph = graph;
+      postToComposer({ type: "clouddeploy:apply_composer_graph", graph });
+    }
+
+    function renderInlineCard({ title, bodyMd, actions = [] }) {
+      const feed = document.getElementById("aiFeed");
+      if (!feed) return;
+
+      const card = document.createElement("div");
+      card.className = "rounded-2xl border border-gray-200 bg-white p-4 shadow-sm";
+
+      const h = document.createElement("div");
+      h.className = "font-semibold text-gray-900";
+      h.textContent = title;
+
+      const body = document.createElement("div");
+      body.className = "mt-2 prose prose-sm max-w-none";
+      body.innerHTML = renderMarkdownSafe(bodyMd || "");
+
+      const btnRow = document.createElement("div");
+      btnRow.className = "mt-3 flex flex-wrap gap-2";
+
+      actions.forEach((a) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className =
+          a.className ||
+          "bg-primary-blue text-white px-3 py-2 rounded-md text-sm font-medium";
+        b.textContent = a.label;
+        b.addEventListener("click", a.onClick);
+        btnRow.appendChild(b);
+      });
+
+      card.appendChild(h);
+      card.appendChild(body);
+      if (actions.length) card.appendChild(btnRow);
+
+      feed.appendChild(card);
+      feed.scrollTop = feed.scrollHeight;
+      return card;
+    }
+
+    function renderBuild(build) {
+      if (!build) return;
+      const files = build.files || {};
+      const notes = build.notes || [];
+      let md = "";
+
+      if (build.format) md += `**Format:** ${build.format}\n\n`;
+      for (const [name, content] of Object.entries(files)) {
+        md += `### ${name}\n\n\`\`\`\n${String(content || "")}\n\`\`\`\n\n`;
+      }
+      if (notes.length) {
+        md += "### Notes\n" + notes.map((n) => `- ${n}`).join("\n") + "\n";
+      }
+
+      aiMessage(md, "assistant");
+    }
+
+    async function generatePlanFromGraph() {
+      if (!state.graph) throw new Error("No diagram graph available.");
+      const resp = await callComposerAI({
+        action: "plan.from_graph",
+        stage: "plan",
+        current_graph: state.graph,
+        build_format: state.buildFormat,
+      });
+      state.plan = resp.plan || null;
+      state.approvedPlan = false;
+      setStage("plan");
+
+      const planMd = resp?.plan
+        ? `**Plan Summary:** ${resp.plan.summary || ""}\n\n` +
+          (Array.isArray(resp.plan.steps)
+            ? resp.plan.steps
+                .map((s, i) => `**${i + 1}. ${s.name}** — ${s.description || ""}`)
+                .join("\n")
+            : "")
+        : "(No plan returned)";
+
+      renderInlineCard({
+        title: "Deployment plan (review & approve)",
+        bodyMd: planMd,
+        actions: [
+          {
+            label: "Approve plan & generate IaC",
+            className:
+              "bg-green-600 text-white px-3 py-2 rounded-md text-sm font-medium",
+            onClick: async () => {
+              try {
+                state.approvedPlan = true;
+                const out = await callComposerAI({
+                  action: "build.generate",
+                  stage: "build",
+                  approved_plan: true,
+                  current_graph: state.graph,
+                  build_format: state.buildFormat,
+                });
+                setStage("build");
+                renderBuild(out.build);
+              } catch (e) {
+                timeline(`Build failed: ${String(e.message || e)}`, "error");
+                aiMessage(`❌ Build failed: ${String(e.message || e)}`, "assistant");
+              }
+            },
+          },
+          {
+            label: "Set format: Terraform",
+            className:
+              "bg-gray-100 text-gray-800 px-3 py-2 rounded-md text-sm font-medium",
+            onClick: () => {
+              state.buildFormat = "terraform";
+              aiMessage("✅ Build format set to **terraform**.", "assistant");
+            },
+          },
+          {
+            label: "Set format: CloudFormation",
+            className:
+              "bg-gray-100 text-gray-800 px-3 py-2 rounded-md text-sm font-medium",
+            onClick: () => {
+              state.buildFormat = "cloudformation";
+              aiMessage("✅ Build format set to **cloudformation**.", "assistant");
+            },
+          },
+          {
+            label: "Set format: AWS CLI",
+            className:
+              "bg-gray-100 text-gray-800 px-3 py-2 rounded-md text-sm font-medium",
+            onClick: () => {
+              state.buildFormat = "awscli";
+              aiMessage("✅ Build format set to **awscli**.", "assistant");
+            },
+          },
+        ],
+      });
+    }
+
+    function renderDiagramApproval() {
+      renderInlineCard({
+        title: "Diagram ready (approve to continue)",
+        bodyMd:
+          "Review the diagram in the **Composer** tab. When it looks correct, approve to generate a plan.",
+        actions: [
+          {
+            label: "Approve diagram & generate plan",
+            className:
+              "bg-green-600 text-white px-3 py-2 rounded-md text-sm font-medium",
+            onClick: async () => {
+              try {
+                state.approvedDiagram = true;
+                setStage("plan");
+                await generatePlanFromGraph();
+              } catch (e) {
+                timeline(`Plan failed: ${String(e.message || e)}`, "error");
+                aiMessage(`❌ Plan failed: ${String(e.message || e)}`, "assistant");
+              }
+            },
+          },
+        ],
+      });
+    }
+
+    async function handleComposerRequest(msg) {
+      // Requests from composer-ui (see composer-ui/src/integration/aiDiagramSync.js)
+      if (msg.type === "clouddeploy:request_diagram_generate") {
+        const prompt = String(msg.prompt || "").trim();
+        if (!prompt) return;
+
+        timeline("Composer requested: diagram.generate", "info");
+        aiMessage(`🧩 Generating diagram from prompt…\n\n> ${prompt}`, "assistant");
+
+        const out = await callComposerAI({
+          action: "diagram.generate",
+          stage: "diagram",
+          prompt,
+        });
+
+        // Reset approvals on new diagram
+        state.approvedDiagram = false;
+        state.approvedPlan = false;
+        state.plan = null;
+
+        if (out?.composer_graph) applyGraph(out.composer_graph);
+        setStage("diagram");
+        renderDiagramApproval();
+        return;
+      }
+
+      if (msg.type === "clouddeploy:request_diagram_edit") {
+        const instruction = String(msg.instruction || "").trim();
+        if (!instruction) return;
+        timeline("Composer requested: diagram.edit", "info");
+
+        const out = await callComposerAI({
+          action: "diagram.edit",
+          stage: "diagram",
+          instruction,
+          current_graph: msg.current_graph || state.graph,
+        });
+
+        state.approvedDiagram = false;
+        state.approvedPlan = false;
+        state.plan = null;
+
+        if (out?.composer_graph) applyGraph(out.composer_graph);
+        setStage("diagram");
+        renderDiagramApproval();
+        return;
+      }
+
+      if (msg.type === "clouddeploy:request_diagram_from_graph") {
+        timeline("Composer requested: diagram.from_graph", "info");
+        const out = await callComposerAI({
+          action: "diagram.from_graph",
+          stage: "diagram",
+          current_graph: msg.current_graph || state.graph,
+        });
+
+        if (out?.composer_graph) applyGraph(out.composer_graph);
+        if (out?.diagram?.content)
+          aiMessage(String(out.diagram.content), "assistant");
+        return;
+      }
+
+      if (msg.type === "clouddeploy:composer_graph_changed") {
+        // Keep latest manual edits.
+        if (msg.graph) state.graph = msg.graph;
+      }
+    }
+
+    function install() {
+      // Strict origin/source checks to avoid cross-site message injection.
+      window.addEventListener("message", async (ev) => {
+        const fr = iframe();
+        if (!fr || ev.source !== fr.contentWindow) return;
+        if (ev.origin !== window.location.origin) return;
+        const msg = ev.data;
+        if (!msg || typeof msg !== "object" || !msg.type) return;
+
+        try {
+          await handleComposerRequest(msg);
+        } catch (e) {
+          timeline(`Composer AI error: ${String(e.message || e)}`, "error");
+          aiMessage(`❌ Composer AI error: ${String(e.message || e)}`, "assistant");
+        }
+      });
+    }
+
+    return { install, applyGraph, setStage };
+  }
+
   // ----------------------------------------------------------------------------
   // Robust WS creator
   // ----------------------------------------------------------------------------
@@ -656,6 +956,14 @@
     // Settings modal controller
     // -----------------------------
     createSettingsController();
+
+    // -----------------------------
+    // Composer AI bridge
+    // -----------------------------
+    // Composer AI bridge (postMessage <-> /api/composer-ai)
+    // Safe to install even if Composer tab is never opened.
+    const composerBridge = createComposerBridge();
+    composerBridge.install();
 
     // -----------------------------
     // WebSockets

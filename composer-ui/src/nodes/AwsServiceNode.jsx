@@ -1,4 +1,5 @@
 import React from "react";
+import { Handle, Position } from "reactflow";
 import { getAwsIcon } from "../icons/aws/index.js";
 
 export default function AwsServiceNode({ data }) {
@@ -18,6 +19,12 @@ export default function AwsServiceNode({ data }) {
         minWidth: 180,
       }}
     >
+      {/* Connection handles (ports) */}
+      <Handle type="target" position={Position.Left} id="l" style={{ width: 10, height: 10 }} />
+      <Handle type="source" position={Position.Right} id="r" style={{ width: 10, height: 10 }} />
+      <Handle type="target" position={Position.Top} id="t" style={{ width: 10, height: 10 }} />
+      <Handle type="source" position={Position.Bottom} id="b" style={{ width: 10, height: 10 }} />
+
       <div style={{ width: 24, height: 24, display: "grid", placeItems: "center" }}>
         {Icon ? <Icon /> : <span style={{ fontSize: 16 }}>☁️</span>}
       </div>
